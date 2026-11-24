@@ -8,7 +8,8 @@ const FALLBACK_GEMINI_MODELS = [
   "gemini-2.5-flash"
 ];
 
-let cachedWorkingModels = null;
+let cachedModelsByKey = new Map();
+let failedModelUntil = new Map();
 let apiCooldownUntil = 0;
 
 const RETRYABLE_HTTP_CODES = new Set([400, 403, 404, 408, 429, 500, 502, 503, 504]);
@@ -164,7 +165,7 @@ function createPanel() {
     <div style="font-weight: 600; margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center;">
       <span style="display:flex; align-items:center; gap:6px;">
         <span style="color:#ffffff;">CodeTantra Agent</span>
-        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v6.7</span>
+        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v6.8</span>
         <button id="ct-set-key" class="ct-icon-btn" title="Set custom Gemini API Key">Key</button>
         <button id="ct-scan-top" class="ct-icon-btn" title="Jump to topmost incomplete pink question">Top</button>
         <button id="ct-lang-btn" class="ct-icon-btn" title="Preferred language for multi-lang editors">Lang</button>
@@ -223,7 +224,8 @@ function createPanel() {
     const newKey = prompt("1 ya multiple Gemini API Keys paste karo (comma se separate karke — 429 aane par auto-rotate hoga):", curRaw);
     if (newKey && newKey.trim()) {
       localStorage.setItem("ct_gemini_api_key", newKey.trim());
-      cachedWorkingModels = null;
+      cachedModelsByKey.clear();
+      failedModelUntil.clear();
       apiCooldownUntil = 0;
       const count = getApiKeys().length;
       setStatus(`Keys saved (${count}) ✓`, "#86efac");
@@ -305,8 +307,9 @@ function formatNumberedCode(code, lockedLines = []) {
 
 // ---------------- Dynamic Model Discovery + Diverse Quota Buckets + Multi-Key Rotation ----------------
 async function discoverAvailableModels(apiKey) {
-  if (cachedWorkingModels && cachedWorkingModels.length > 0) {
-    return cachedWorkingModels;
+  const cached = cachedModelsByKey.get(apiKey);
+  if (cached && cached.length > 0) {
+    return cached;
   }
 
   try {
@@ -321,7 +324,8 @@ async function discoverAvailableModels(apiKey) {
           const methods = m.supportedGenerationMethods || [];
           if (!methods.includes("generateContent")) return false;
           if (!name.startsWith("gemini-") && !name.startsWith("gemma-3-")) return false;
-          if (/(image|tts|live|audio|embed|robotics|transcribe|1\.5|2\.0|2\.5-flash-lite|2\.5-flash$|2\.5-pro$|gemma-3-1b|gemma-3-4b)/i.test(name)) {
+          // Drop broken/overloaded preview & deprecated models immediately!
+          if (/(image|tts|live|audio|embed|robotics|transcribe|1\.5|2\.0|2\.5-flash-lite|2\.5-flash$|2\.5-pro$|3\.1-flash-lite|gemma-3-1b|gemma-3-4b)/i.test(name)) {
             return false;
           }
           return true;
@@ -329,21 +333,22 @@ async function discoverAvailableModels(apiKey) {
         .map((m) => (m.name || "").replace(/^models\//, ""));
 
       if (eligible.length > 0) {
+        // Put stable, fast, non-503 models & Gemma-3-27B FIRST; overloaded flash-lite at the back!
         const scoreModel = (name) => {
-          if (name.includes("3.5-flash-lite")) return 1;
+          if (name === "gemini-flash-latest") return 1;
           if (name.includes("3.6-flash")) return 2;
           if (name.includes("3.7-flash")) return 3;
           if (name.includes("3.8-flash")) return 4;
-          if (name === "gemini-flash-latest") return 5;
-          if (name.includes("flash-lite")) return 6;
-          if (name.includes("flash")) return 7;
-          if (name.includes("gemma-3-27b")) return 8;
-          if (name.includes("gemma-3-12b")) return 9;
+          if (name === "gemma-3-27b-it") return 5;
+          if (name === "gemini-pro-latest") return 6;
+          if (name.includes("flash") && !name.includes("lite")) return 7;
+          if (name === "gemma-3-12b-it") return 8;
+          if (name.includes("3.5-flash-lite")) return 9;
+          if (name.includes("flash-lite")) return 10;
           return 12;
         };
         eligible.sort((a, b) => scoreModel(a) - scoreModel(b));
 
-        // Pick DIVERSE model families (different quota buckets!) so 429 on one bucket doesn't kill all attempts
         const familyOf = (n) => {
           if (n.includes("gemma-3-27b")) return "gemma27";
           if (n.includes("gemma-3-12b")) return "gemma12";
@@ -351,7 +356,6 @@ async function discoverAvailableModels(apiKey) {
           if (n.includes("3.6")) return "g36";
           if (n.includes("3.7")) return "g37";
           if (n.includes("3.8")) return "g38";
-          if (n.includes("2.5")) return "g25";
           if (n.includes("pro")) return "pro";
           return n;
         };
@@ -363,30 +367,29 @@ async function discoverAvailableModels(apiKey) {
             seenFam.add(fam);
             diverse.push(m);
           }
-          if (diverse.length >= 7) break;
+          if (diverse.length >= 8) break;
         }
-        // Ensure gemma-3-27b-it is always available as a huge separate free-tier fallback
         if (eligible.includes("gemma-3-27b-it") && !diverse.includes("gemma-3-27b-it")) {
           diverse.push("gemma-3-27b-it");
         }
 
         const lastGood = localStorage.getItem("ct_last_working_model");
-        if (lastGood && eligible.includes(lastGood)) {
-          cachedWorkingModels = [lastGood, ...diverse.filter((m) => m !== lastGood)].slice(0, 8);
-        } else {
-          cachedWorkingModels = diverse.slice(0, 8);
-        }
-        return cachedWorkingModels;
+        const finalList =
+          lastGood && eligible.includes(lastGood)
+            ? [lastGood, ...diverse.filter((m) => m !== lastGood)].slice(0, 8)
+            : diverse.slice(0, 8);
+        cachedModelsByKey.set(apiKey, finalList);
+        return finalList;
       }
     }
   } catch {
     // Fall back to static list
   }
 
-  return [...FALLBACK_GEMINI_MODELS, "gemma-3-27b-it"];
+  return ["gemini-flash-latest", "gemma-3-27b-it", ...FALLBACK_GEMINI_MODELS];
 }
 
-async function fetchWithTimeout(url, options, timeoutMs = 15000) {
+async function fetchWithTimeout(url, options, timeoutMs = 10000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -409,12 +412,17 @@ function extractJsonFromText(raw) {
 async function callGemini(prompt) {
   const apiKeys = getApiKeys();
   const errorLogs = [];
+  const now = Date.now();
 
   for (let kIdx = 0; kIdx < apiKeys.length; kIdx++) {
     const apiKey = apiKeys[kIdx];
     const models = await discoverAvailableModels(apiKey);
 
-    for (const model of models) {
+    // Skip models blacklisted in the last 4 minutes for 503/429/Timeout (unless ALL are blacklisted)
+    const healthyModels = models.filter((m) => (failedModelUntil.get(`${kIdx}:${m}`) || 0) <= now);
+    const runModels = healthyModels.length ? healthyModels : models;
+
+    for (const model of runModels) {
       const isGemma = model.startsWith("gemma-");
       setStatus(`AI: ${model.replace("gemini-", "")} (K${kIdx + 1})`, "#60a5fa");
       try {
@@ -432,16 +440,18 @@ async function callGemini(prompt) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(bodyObj)
           },
-          15000
+          10000
         );
 
         const data = await res.json().catch(() => ({}));
         if (res.ok && !data.error) {
           const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
           if (rawText) {
+            failedModelUntil.delete(`${kIdx}:${model}`);
             localStorage.setItem("ct_last_working_model", model);
-            if (cachedWorkingModels) {
-              cachedWorkingModels = [model, ...cachedWorkingModels.filter((m) => m !== model)];
+            const keyList = cachedModelsByKey.get(apiKey);
+            if (keyList) {
+              cachedModelsByKey.set(apiKey, [model, ...keyList.filter((m) => m !== model)]);
             }
             return { ok: true, model, rawText: extractJsonFromText(rawText) };
           }
@@ -451,16 +461,20 @@ async function callGemini(prompt) {
         errorLogs.push(`K${kIdx + 1}/${model} (${res.status}): ${errMsg.slice(0, 75)}`);
 
         if (res.status === 400 && /api key not valid/i.test(errMsg)) {
-          // Invalid key -> skip remaining models on this key, try next key!
           break;
+        }
+        // Blacklist broken/overloaded/quota-hit model for 4 minutes so it never wastes time again!
+        if (res.status === 503 || res.status === 429 || res.status === 404) {
+          failedModelUntil.set(`${kIdx}:${model}`, Date.now() + 240000);
         }
 
         if (RETRYABLE_HTTP_CODES.has(res.status)) {
-          await sleep(300);
+          await sleep(250);
           continue;
         }
       } catch (err) {
-        const msg = err.name === "AbortError" ? "Timeout (15s)" : err.message;
+        const msg = err.name === "AbortError" ? "Timeout (10s)" : err.message;
+        failedModelUntil.set(`${kIdx}:${model}`, Date.now() + 240000);
         errorLogs.push(`K${kIdx + 1}/${model}: ${msg}`);
       }
     }
@@ -690,8 +704,15 @@ Strict Rules:
       return;
     }
 
-    const cleaned = apiRes.rawText.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
-    const parsed = JSON.parse(cleaned);
+    const cleaned = extractJsonFromText(apiRes.rawText);
+    let parsed = null;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch {
+      previousError = "Model returned invalid JSON — please return strictly valid JSON.";
+      setStatus(`JSON retry (${attempt})...`, "#facc15");
+      continue;
+    }
     let edits = Array.isArray(parsed.edits)
       ? parsed.edits
       : parsed.code
@@ -853,8 +874,9 @@ Task:
     }
 
     if (attempt === MAX_FIX_ATTEMPTS) {
+      apiCooldownUntil = Date.now() + 25000;
       setStatus("Check test cases", "#facc15");
-      setOutput(`Attempt ${attempt} ke baad result:\n${evalRes.summary || "Manual check needed."}`);
+      setOutput(`Attempt ${attempt} ke baad result:\n${evalRes.summary || "Manual check needed."}\n(25s pause — quota save kar raha hoon)`);
       return;
     }
 

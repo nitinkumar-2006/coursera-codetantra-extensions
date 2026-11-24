@@ -131,7 +131,7 @@ function createPanel() {
     <div style="font-weight: 600; margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center;">
       <span style="display:flex; align-items:center; gap:6px;">
         <span style="color:#ffffff;">Coursera Agent</span>
-        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v29</span>
+        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v30</span>
         <button id="cs-set-key" class="cs-icon-btn" title="Set custom Gemini API Key">Key</button>
       </span>
       <span id="cs-status" style="color:#e5e7eb; font-size:11px; font-weight:500; max-width:130px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">Idle</span>
@@ -302,8 +302,13 @@ function normalizeText(str) {
     .replace(/\s+/g, " ")
     .replace(/[\u201C\u201D]/g, '"')
     .replace(/[\u2018\u2019\u2032\u0060]/g, "'")
+    .replace(/[\u2212\u2013\u2014]/g, "-")
     .trim()
     .toLowerCase();
+}
+
+function normalizeMathLoose(str) {
+  return normalizeText(str).replace(/[\s.,;]+/g, "");
 }
 
 // Reads visible text ONLY from the right-side main content pane (never contaminated by the left sidebar!)
@@ -785,8 +790,6 @@ function handleGlobalModals() {
     }
 
     if (text.includes("leave this lab")) {
-      // Only auto-leave ungraded labs, never auto-leave a graded programming lab!
-      if (getPageType() === "graded_lab") return false;
       const leaveBtn = findButtonByText(["leave lab"], modal);
       if (leaveBtn) {
         setStatus("Leaving Lab...", "#c084fc");
@@ -1527,20 +1530,50 @@ function handleGradedLabPage() {
       return;
     }
 
-    // Not passed yet — automatically ask Gemini AI once for the exact Terminal fix & copy to clipboard
+    // Not passed yet — automatically ask Gemini AI once, then in unattended Auto mode Exit & skip to keep finishing the course!
     const sig = getLabErrorSignature(getMainContentText() || pageText);
     if (sig && labAiLastErrorSignature[window.location.pathname] !== sig) {
       solveGradedLabWithAI();
       return;
     }
 
-    setStatus("Paste fix in Terminal -> Submit", "#facc15");
+    if (elapsed > 25000) {
+      const baseP = getCurrentBasePath();
+      const baseId = extractCourseraItemId(baseP) || baseP;
+      sidebarSkippedUrls.add(baseP);
+      sidebarSkippedUrls.add(baseId);
+      const exitBtn = findButtonByText(["exit lab"], document, { partial: true });
+      if (exitBtn) {
+        actionLock = true;
+        setStatus("IDE Lab -> Skipping to Next", "#facc15");
+        exitBtn.click();
+        setTimeout(() => {
+          const leaveBtn = findButtonByText(["leave lab"], document);
+          if (leaveBtn) leaveBtn.click();
+          setTimeout(() => {
+            actionLock = false;
+            goToNextItem(2000, "Skipping IDE Lab -> Next");
+          }, 1800);
+        }, 1200);
+        return;
+      }
+    }
+
+    setStatus("IDE Lab (auto-skip soon)...", "#facc15");
     return;
   }
 
-  // 3. On Graded Lab cover page (/programming/... without /lab): click Launch lab / Resume lab!
+  // 3. On Graded Lab cover page (/programming/... without /lab):
   if (elapsed < 2200) {
     setStatus("Lab loading...", "#9ca3af");
+    return;
+  }
+
+  const baseP = getCurrentBasePath();
+  const baseId = extractCourseraItemId(baseP) || baseP;
+  // If we already tried/skipped this Graded IDE Lab, move straight to the next item so Auto never loops!
+  if (sidebarSkippedUrls.has(baseP) || sidebarSkippedUrls.has(baseId)) {
+    goToNextItem(randMs(2500, 3500), "IDE Lab skipped -> Next");
     return;
   }
 
@@ -1802,7 +1835,25 @@ function handleQuizPage() {
   const elapsed = Date.now() - pageEnteredAt;
 
   if (quizFailedUrls.has(baseQuizKey)) {
-    setStatus("Quiz Error (paused)", "#f87171");
+    // NEVER freeze the whole course forever on a failed quiz — skip cleanly and keep finishing remaining items!
+    const qId = extractCourseraItemId(baseQuizKey) || baseQuizKey;
+    sidebarSkippedUrls.add(baseQuizKey);
+    sidebarSkippedUrls.add(qId);
+    if (path.includes("/attempt") || path.includes("/view-feedback") || path.includes("/view-submission")) {
+      const backBtn = findButtonByText(["back"], document, { partial: true });
+      if (backBtn) {
+        actionLock = true;
+        setStatus("Quiz skipped -> Back", "#facc15");
+        setTimeout(() => {
+          backBtn.click();
+          setTimeout(() => {
+            actionLock = false;
+          }, 2500);
+        }, 1200);
+        return;
+      }
+    }
+    goToNextItem(randMs(2500, 3500), "Quiz skipped -> Next");
     return;
   }
 
@@ -2192,24 +2243,34 @@ async function tickQuestionAnswers(blocks, results) {
       }
     }
 
-    for (const ans of answers) {
+    for (const rawAns of answers) {
+      const ans = String(rawAns).replace(/\s*\[math:.*?\]/gi, "").trim();
       totalExpected++;
       const target = normalizeText(ans);
+      const targetLoose = normalizeMathLoose(ans);
       if (!target) continue;
 
       let matchedLabel = searchLabels.find(
-        (l) => normalizeText(l.innerText) === target || normalizeText(extractCleanTextWithMath(l)) === target
+        (l) =>
+          normalizeText(l.innerText) === target ||
+          normalizeText(extractCleanTextWithMath(l)) === target ||
+          (targetLoose.length >= 2 &&
+            (normalizeMathLoose(l.innerText) === targetLoose ||
+              normalizeMathLoose(extractCleanTextWithMath(l)) === targetLoose))
       );
 
       if (!matchedLabel && target.length >= 3) {
         matchedLabel = searchLabels.find((l) => {
           const lt = normalizeText(l.innerText);
           const mt = normalizeText(extractCleanTextWithMath(l));
+          const ll = normalizeMathLoose(l.innerText);
+          const ml = normalizeMathLoose(extractCleanTextWithMath(l));
           return (
             lt.includes(target) ||
             (lt.length >= 3 && target.includes(lt)) ||
             mt.includes(target) ||
-            (mt.length >= 3 && target.includes(mt))
+            (mt.length >= 3 && target.includes(mt)) ||
+            (targetLoose.length >= 3 && (ll.includes(targetLoose) || ml.includes(targetLoose)))
           );
         });
       }

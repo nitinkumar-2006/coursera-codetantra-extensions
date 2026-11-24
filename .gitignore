@@ -1,5 +1,6 @@
 # Local helper scripts (contains local macOS scripts & personal keys)
 lab-agent/
+update.command
 
 # Python virtual environments & cache
 .venv/

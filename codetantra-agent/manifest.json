@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CodeTantra AI Agent",
-  "version": "6.7",
+  "version": "6.8",
   "description": "Full A-to-Z CodeTantra automation (Python, Java, C++): CodeMirror 6 iframe human-typing with strict indentation, 100% test-case pass detection, Objective/MCQ auto-solver, video/theory slide auto-next",
   "permissions": ["activeTab"],
   "host_permissions": [

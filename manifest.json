@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Coursera Auto Helper",
-  "version": "29.0",
-  "description": "Apple Dark Glassmorphism + A-to-Z Audited Engine: Dynamic Pass%, Hard-Guarded Smart Quiz Retry, Multi-Select Checkbox Cleanup, Item-ID Backtrack, In-Video Skip, All Popups Auto-Dismiss, Dynamic Fast AI",
+  "version": "31.0",
+  "description": "Apple Dark Glassmorphism + Objective + Written/Numeric Text-Input Auto-Typing (CodeTantra-style) + Zero-Freeze Unattended Mode + KaTeX Math + Smart Feedback Memory",
   "permissions": ["activeTab", "tabs", "clipboardWrite"],
   "host_permissions": [
     "https://www.coursera.org/*",

@@ -163,8 +163,8 @@
       // Measure ENTIRE doc visible text length (handles sibling accordion bodies!)
       const beforeLen = (doc.body.innerText || "").length;
 
-      // Click ONCE on toggleBtn — NEVER double-toggle!
-      toggleBtn.click();
+      // Click ONCE on toggleBtn with full mouse events — NEVER double-toggle!
+      dispatchReliableClick(toggleBtn);
       await sleep(500);
 
       const afterLen1 = (doc.body.innerText || "").length;
@@ -173,19 +173,19 @@
       }
       if (afterLen1 < beforeLen - 20) {
         // It was already open and we accidentally closed it — click ONCE to re-open!
-        toggleBtn.click();
+        dispatchReliableClick(toggleBtn);
         await sleep(450);
         return true;
       }
 
       // If toggleBtn had no effect at all, try clicking header itself ONCE
       if (header !== toggleBtn) {
-        header.click();
+        dispatchReliableClick(header);
         await sleep(500);
         const afterLen2 = (doc.body.innerText || "").length;
         if (afterLen2 > beforeLen + 20) return true;
         if (afterLen2 < beforeLen - 20) {
-          header.click();
+          dispatchReliableClick(header);
           await sleep(450);
           return true;
         }
@@ -1439,6 +1439,7 @@
 
       if (type === "STOP_TYPING") {
         stopTypingFlag = true;
+        activeTypingSessionId++;
         broadcastToChildFrames({ source: "CT_TOP_TO_FRAME", id, type: "STOP_TYPING", payload: {} });
         window.postMessage({ source: "CT_BRIDGE", id, type: "STOP_TYPING_RES", payload: { ok: true } }, "*");
         return;
@@ -1633,6 +1634,7 @@
 
       if (type === "STOP_TYPING") {
         stopTypingFlag = true;
+        activeTypingSessionId++;
         broadcastToChildFrames(data);
         return;
       }
