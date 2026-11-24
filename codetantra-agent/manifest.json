@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "CodeTantra AI Agent",
+  "version": "6.7",
+  "description": "Full A-to-Z CodeTantra automation (Python, Java, C++): CodeMirror 6 iframe human-typing with strict indentation, 100% test-case pass detection, Objective/MCQ auto-solver, video/theory slide auto-next",
+  "permissions": ["activeTab"],
+  "host_permissions": [
+    "https://*.codetantra.com/*",
+    "https://generativelanguage.googleapis.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://*.codetantra.com/*"],
+      "js": ["editor_bridge.js"],
+      "world": "MAIN",
+      "all_frames": true,
+      "match_about_blank": true,
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://*.codetantra.com/*"],
+      "js": ["content.js"],
+      "all_frames": false,
+      "run_at": "document_idle"
+    }
+  ]
+}

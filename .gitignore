@@ -1,0 +1,22 @@
+# Local helper scripts (contains local macOS scripts & personal keys)
+lab-agent/
+
+# Python virtual environments & cache
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment & secrets
+.env
+.env.*
+
+# macOS & editor files
+.DS_Store
+.vscode/
+.idea/
+
+# Packaged archives
+*.zip
+*.crx
