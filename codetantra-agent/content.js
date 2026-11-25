@@ -30,6 +30,12 @@ const VERIFIED_WORKING_MODELS = [
   "gemini-3.5-flash-lite"
 ];
 
+const BLOCKED_SLIDE_PATTERNS = [/\b29\.1\.6\b/i, /koko eating bananas/i];
+function isBlockedSlideText(text) {
+  const t = (text || "").replace(/\s+/g, " ").trim();
+  return BLOCKED_SLIDE_PATTERNS.some((re) => re.test(t));
+}
+
 let cachedModelsByKey = new Map();
 let failedModelUntil = new Map();
 let apiCooldownUntil = 0;
@@ -244,7 +250,7 @@ function createPanel() {
     <div style="font-weight: 600; margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center; gap:6px;">
       <span style="display:flex; align-items:center; gap:4px; flex-wrap:nowrap;">
         <span style="color:#ffffff; white-space:nowrap;">CodeTantra</span>
-        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 5px; border-radius:6px;">v7.3</span>
+        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 5px; border-radius:6px;">v7.5</span>
         <button id="ct-set-key" class="ct-icon-btn ct-key-missing" title="Set CodeTantra-only Gemini API Key">Set Key</button>
         <button id="ct-scan-top" class="ct-icon-btn" title="Jump to topmost incomplete pink question">Top</button>
         <button id="ct-lang-btn" class="ct-icon-btn" title="Preferred language for multi-lang editors">Lang</button>
@@ -776,7 +782,7 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
     if (latestErrInfo.cls) errRequiredClass = latestErrInfo.cls;
 
     const numberedStarter = formatNumberedCode(currentState.code, currentState.lockedLines);
-    const lang = currentState.language || "infer from problem statement & starter code";
+    const lang = currentState.language || (prefLang !== "auto" ? prefLang : "infer from problem statement & starter code");
 
     // SURGICAL FAST-FIX: If the ONLY issue is missing 'package qXXXXX;' on Line 1 of an existing Java file, insert ONLY Line 1 without rewriting the whole file!
     if (
@@ -845,6 +851,7 @@ Return ONLY valid JSON in this exact format:
 }
 
 Strict Rules:
+- STRICT LANGUAGE RULE: Write the entire solution ONLY in ${lang}! NEVER write C/C++ (#include <stdio.h>) inside a Java/Python editor, and NEVER write Java inside a C/Python editor!
 - GROUND TRUTH = SAMPLE TEST CASES! Before finalizing edits, mentally dry-run the ENTIRE program (all [LOCKED] lines + your [EDITABLE] edits) against Sample Test Case 1 and put the exact printed stdout in "dry_run_output". Your dry_run_output MUST match the Sample Test Cases Expected Output character-for-character (even if a comment in starter code says something extra like 'also prints parent method' — do NOT print extra lines that are NOT in Expected Output!).
 - NEVER modify [LOCKED] lines!
 - Carefully check ALL [EDITABLE] lines — including class/function headers (e.g. changing 'class Painter:' to 'class Painter(Participant):' when inheritance is needed!), blank [EDITABLE] lines, placeholder comments, AND any broken/leftover lines from a previous failed attempt (remove/replace them cleanly!). NEVER use hacks like '__bases__'!
@@ -1275,9 +1282,27 @@ async function runAutoTick() {
       return;
     }
 
+    // Skip explicitly blocked slides (e.g. 29.1.6) immediately without solving or calling API
+    if (isBlockedSlideText(document.body?.innerText?.slice(0, 2500) || "")) {
+      solvedUrls.add(window.location.href);
+      setStatus("Blocked 29.1.6 → Skip", "#facc15");
+      setOutput("29.1.6 blocked hai — skip karke agle question par jaa raha hoon...");
+      await sleep(700);
+      await clickNextSlide();
+      return;
+    }
+
     // NEVER blindly skip a coding/quiz page via solvedUrls — always verify actual test-case pass status!
     const edState = await callBridge("READ_EDITOR", {}, 3500);
     if (edState && edState.found) {
+      if (isBlockedSlideText(edState.problemText || "")) {
+        solvedUrls.add(window.location.href);
+        setStatus("Blocked 29.1.6 → Skip", "#facc15");
+        setOutput("29.1.6 blocked hai — skip karke agle question par jaa raha hoon...");
+        await sleep(700);
+        await clickNextSlide();
+        return;
+      }
       await solveCurrentSlide({ autoSubmitAndNext: true });
       return;
     }

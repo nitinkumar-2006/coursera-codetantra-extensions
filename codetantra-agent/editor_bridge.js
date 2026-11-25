@@ -15,6 +15,12 @@
     return Math.floor(min + Math.random() * (max - min));
   }
 
+  const BLOCKED_QUESTION_PATTERNS = [/\b29\.1\.6\b/i, /koko eating bananas/i];
+  function isBlockedQuestionText(str) {
+    const t = (str || "").replace(/\s+/g, " ").trim();
+    return BLOCKED_QUESTION_PATTERNS.some((re) => re.test(t));
+  }
+
   function normalizeText(str) {
     return (str || "").replace(/\s+/g, " ").trim().toLowerCase();
   }
@@ -108,6 +114,22 @@
   }
 
   function detectLanguageFromDoc(doc) {
+    // 1. Check top-right CodeTantra language dropdown button (Java / Python / C++ / C) first!
+    const topBtns = Array.from(doc.querySelectorAll("button, [role='button'], select")).filter(
+      (el) => !el.closest("#ct-helper-panel") && isVisible(el)
+    );
+    for (const el of topBtns) {
+      const r = el.getBoundingClientRect();
+      if (r.top < 170 && r.width < 150) {
+        const t = (el.innerText || el.textContent || "").replace(/[^a-z0-9+]/gi, "").toLowerCase();
+        if (t === "java") return "java";
+        if (t === "python" || t === "python3") return "python";
+        if (t === "c++" || t === "cpp") return "cpp";
+        if (t === "c") return "c";
+      }
+    }
+
+    // 2. Check file tab extensions (.java, .py, .c, .cpp) OR truncated CodeTantra prefixes (CTJ... = Java, CTC... = C, CTP... = Python)
     const els = Array.from(doc.querySelectorAll("[role='tab'], .tab, button, span, div"));
     for (const el of els) {
       const t = (el.textContent || "").trim();
@@ -125,6 +147,12 @@
           sql: "sql"
         };
         if (map[ext]) return map[ext];
+      }
+      if (t.length >= 4 && t.length < 25) {
+        if (/^CTJ\d+/i.test(t)) return "java";
+        if (/^CTP\d+/i.test(t)) return "python";
+        if (/^CTCPP\d+/i.test(t)) return "cpp";
+        if (/^CTC\d+/i.test(t)) return "c";
       }
     }
     return "";
@@ -240,13 +268,13 @@
       (el) => !el.closest("#ct-helper-panel") && isVisible(el)
     );
     const langTrigger = btns.find((el) => {
-      const t = normalizeText(el.innerText || el.textContent || "");
+      const t = (el.innerText || el.textContent || "").replace(/[^a-z0-9+]/gi, "").toLowerCase();
       const r = el.getBoundingClientRect();
-      return (t === "c" || t === "c++" || t === "java" || t === "python" || t === "python3") && r.top < 170 && r.width < 140;
+      return (t === "c" || t === "c++" || t === "java" || t === "python" || t === "python3") && r.top < 170 && r.width < 150;
     });
     if (!langTrigger) return { ok: false };
 
-    const curText = normalizeText(langTrigger.innerText || langTrigger.textContent || "");
+    const curText = (langTrigger.innerText || langTrigger.textContent || "").replace(/[^a-z0-9+]/gi, "").toLowerCase();
     if (curText === targetLabel || (want === "python" && curText.startsWith("python"))) {
       return { ok: true, already: true };
     }
@@ -367,7 +395,7 @@
       return icons.some((ic) => hasGreenTickColor(ic));
     }
 
-    const incomplete = cards.find((c) => !isCardCompleted(c));
+    const incomplete = cards.find((c) => !isCardCompleted(c) && !isBlockedQuestionText(c.innerText || ""));
     if (!incomplete) {
       return { ok: false, allCompleted: true };
     }
@@ -529,6 +557,9 @@
         const { hasGreen, hasPink } = getSidebarIconStatus(row);
         if (hasGreen) continue;
 
+        // Skip explicitly blocked questions (e.g. 29.1.6)
+        if (isBlockedQuestionText(txt)) continue;
+
         // Is it a leaf question (e.g. "9.4.2. Implementation...")?
         if (leafPattern.test(txt)) {
           if (!isSamePage(row)) {
@@ -547,13 +578,17 @@
           // Expand collapsed module (e.g. "9. Unit 2...")
           clickSidebarRow(row);
           await sleep(450);
-          const expandedLeaves = getSidebarRows(leafPattern).filter((r) => !getSidebarIconStatus(r).hasGreen && !isSamePage(r));
+          const expandedLeaves = getSidebarRows(leafPattern).filter(
+            (r) => !getSidebarIconStatus(r).hasGreen && !isSamePage(r) && !isBlockedQuestionText(r.innerText || "")
+          );
           if (expandedLeaves.length) return clickSidebarRow(expandedLeaves[0]);
         } else if (isUnit && (!nextRow || !leafPattern.test(nextTxt)) && (hasPink || !hasGreen)) {
           // Expand collapsed sub-unit (e.g. "9.4. Circular Queue..." or "9.6. Deque")
           clickSidebarRow(row);
           await sleep(450);
-          const expandedLeaves = getSidebarRows(leafPattern).filter((r) => !getSidebarIconStatus(r).hasGreen && !isSamePage(r));
+          const expandedLeaves = getSidebarRows(leafPattern).filter(
+            (r) => !getSidebarIconStatus(r).hasGreen && !isSamePage(r) && !isBlockedQuestionText(r.innerText || "")
+          );
           if (expandedLeaves.length) return clickSidebarRow(expandedLeaves[0]);
         }
       }
