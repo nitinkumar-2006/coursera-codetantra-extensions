@@ -1,18 +1,54 @@
-const DEFAULT_GEMINI_API_KEY = "";
+// Strictly isolated Coursera-only API Key storage (never shared with CodeTantra)
+const COURSERA_API_KEY_STORAGE = "coursera_only_gemini_api_key_v1";
+const COURSERA_BLOCKED_OTHER_KEY_STORAGE = "coursera_blocked_codetantra_key_v1";
+const COURSERA_VERIFIED_KEY = "";
+try {
+  localStorage.removeItem("cs_gemini_api_key");
+} catch {
+  // ignore storage errors
+}
 
-// Dynamic model discovery (same fast engine as CodeTantra Agent) + fallback list
+function isBlockedOrSharedKey(key) {
+  const k = (key || "").trim();
+  if (!k) return false;
+  // Block the old shared key used earlier across both extensions
+  if (k.startsWith("AQ.Ab8RN6") && k.endsWith("9IQiA")) return true;
+  try {
+    const blockedOther = (localStorage.getItem(COURSERA_BLOCKED_OTHER_KEY_STORAGE) || "").trim();
+    if (blockedOther && blockedOther === k) return true;
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
+// Dynamic model discovery + fallback list
 const FALLBACK_GEMINI_MODELS = [
   "gemini-3.5-flash-lite",
   "gemini-3.6-flash",
   "gemini-3.7-flash",
-  "gemini-3.8-flash",
-  "gemini-2.5-flash"
+  "gemini-3.8-flash"
 ];
 
 let cachedWorkingModels = null;
 
 function getApiKey() {
-  return (localStorage.getItem("cs_gemini_api_key") || DEFAULT_GEMINI_API_KEY).trim();
+  try {
+    const stored = localStorage.getItem(COURSERA_API_KEY_STORAGE);
+    if (stored === "__CLEARED__") return "";
+    const k = (stored || COURSERA_VERIFIED_KEY).trim();
+    if (k && isBlockedOrSharedKey(k)) {
+      localStorage.setItem(COURSERA_API_KEY_STORAGE, "__CLEARED__");
+      return "";
+    }
+    return k;
+  } catch {
+    return COURSERA_VERIFIED_KEY;
+  }
+}
+
+function hasApiKey() {
+  return getApiKey().length >= 20;
 }
 
 const RETRYABLE_HTTP_CODES = new Set([400, 403, 404, 408, 429, 500, 502, 503, 504]);
@@ -131,8 +167,8 @@ function createPanel() {
     <div style="font-weight: 600; margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center;">
       <span style="display:flex; align-items:center; gap:6px;">
         <span style="color:#ffffff;">Coursera Agent</span>
-        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v30</span>
-        <button id="cs-set-key" class="cs-icon-btn" title="Set custom Gemini API Key">Key</button>
+        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v37</span>
+        <button id="cs-set-key" class="cs-icon-btn" title="Set Coursera-only Gemini API Key">Set Key</button>
       </span>
       <span id="cs-status" style="color:#e5e7eb; font-size:11px; font-weight:500; max-width:130px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">Idle</span>
     </div>
@@ -150,6 +186,11 @@ function createPanel() {
   document.body.appendChild(panel);
   document.getElementById("cs-toggle-auto").addEventListener("click", () => setAutoMode(!autoMode));
   document.getElementById("cs-solve-quiz").addEventListener("click", () => {
+    if (!hasApiKey()) {
+      setStatus("API Key Required", "#f87171");
+      setOutput("Pehle upar 'Set Key' button dabakar Coursera Agent ka apna alag Gemini API Key dalo.\n\nBina API Key ke ye kaam nahi karega.");
+      return;
+    }
     if (getPageType() === "graded_lab" && window.location.pathname.toLowerCase().includes("/lab")) {
       solveGradedLabWithAI();
       return;
@@ -164,15 +205,37 @@ function createPanel() {
     solveQuiz({ autoSubmit: true, baseQuizKey: baseKey, useStrongModel: false });
   });
   document.getElementById("cs-set-key").addEventListener("click", () => {
-    const newKey = prompt("Coursera Agent ke liye apna Gemini API Key paste karo:", getApiKey());
-    if (newKey && newKey.trim()) {
-      localStorage.setItem("cs_gemini_api_key", newKey.trim());
+    const newKey = prompt(
+      "Sirf Coursera Agent ke liye apna alag Gemini API Key paste karo (CodeTantra wala same key mat dalna; khali chhod ke OK karne par key remove ho jaayegi):",
+      getApiKey()
+    );
+    if (newKey === null) return;
+    const trimmed = newKey.trim();
+    if (!trimmed) {
+      localStorage.setItem(COURSERA_API_KEY_STORAGE, "__CLEARED__");
       cachedWorkingModels = null;
-      quizCooldownUntil = {};
-      quizFailedUrls.clear();
-      setStatus("Key saved ✓", "#86efac");
-      setOutput("Naya Gemini API Key save ho gaya.");
+      setAutoMode(false);
+      setStatus("API Key Required", "#f87171");
+      setOutput("API Key hata diya gaya hai. Ab jab tak naya key nahi daloge, Coursera Agent kaam nahi karega.");
+      return;
     }
+    if (trimmed.length < 20 || isBlockedOrSharedKey(trimmed)) {
+      localStorage.setItem(COURSERA_API_KEY_STORAGE, "__CLEARED__");
+      cachedWorkingModels = null;
+      setAutoMode(false);
+      setStatus("Same Key Blocked!", "#f87171");
+      setOutput(
+        "Ye purana/shared ya invalid API Key hai — isse reject karke hata diya gaya hai!\n\nCoursera aur CodeTantra mein same API Key allowed nahi hai. Sirf Coursera ke liye ek alag naya Gemini API Key dalo."
+      );
+      return;
+    }
+    localStorage.setItem(COURSERA_API_KEY_STORAGE, trimmed);
+    cachedWorkingModels = null;
+    quizCooldownUntil = {};
+    quizFailedUrls.clear();
+    syncAutoUI();
+    setStatus(`Key ✓ (...${trimmed.slice(-4)})`, "#86efac");
+    setOutput(`Coursera-only API Key (...${trimmed.slice(-4)}) save ho gaya ✓ Ab Start Auto ya Solve Quiz chala sakte ho.`);
   });
 
   syncAutoUI();
@@ -202,7 +265,21 @@ function clearOutput() {
 
 function syncAutoUI() {
   const btn = document.getElementById("cs-toggle-auto");
+  const keyBtn = document.getElementById("cs-set-key");
+  const currentKey = getApiKey();
+  const keyOk = currentKey.length >= 20;
+  if (keyBtn) {
+    keyBtn.innerText = keyOk ? `Key ..${currentKey.slice(-4)}` : "Set Key";
+    keyBtn.style.borderColor = keyOk ? "rgba(134, 239, 172, 0.55)" : "rgba(248, 113, 113, 0.7)";
+    keyBtn.style.color = keyOk ? "#86efac" : "#fca5a5";
+  }
   if (!btn) return;
+  if (!keyOk) {
+    btn.innerText = "Start Auto";
+    btn.classList.remove("cs-glass-btn-running");
+    setStatus("API Key Required", "#f87171");
+    return;
+  }
   if (autoMode) {
     btn.innerText = "Stop Auto";
     btn.classList.add("cs-glass-btn-running");
@@ -215,6 +292,18 @@ function syncAutoUI() {
 }
 
 function setAutoMode(enabled) {
+  if (enabled && !hasApiKey()) {
+    autoMode = false;
+    sessionStorage.setItem("cs_auto_mode", "false");
+    if (autoInterval) {
+      clearInterval(autoInterval);
+      autoInterval = null;
+    }
+    syncAutoUI();
+    setOutput("Coursera Agent ke liye pehle upar 'Set Key' button dabakar apna alag Gemini API Key dalo.\n\nJab tak API Key nahi daloge, ye kaam nahi karega.");
+    return;
+  }
+
   autoMode = enabled;
   sessionStorage.setItem("cs_auto_mode", enabled ? "true" : "false");
   syncAutoUI();
@@ -410,14 +499,142 @@ function scrollReadingStep(fraction = 1.0) {
 }
 
 function setReactInputValue(input, value) {
-  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")?.set;
+  if (!input) return;
+  const strVal = String(value ?? "");
+  if (input.isContentEditable || input.getAttribute("contenteditable") === "true") {
+    input.focus();
+    try {
+      document.execCommand("selectAll", false, null);
+      document.execCommand("insertText", false, strVal);
+    } catch {
+      input.innerText = strVal;
+    }
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: strVal }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    return;
+  }
+  const prevVal = input.value;
+  const proto = input.tagName === "TEXTAREA" ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
   if (setter) {
-    setter.call(input, value);
+    setter.call(input, strVal);
   } else {
-    input.value = value;
+    input.value = strVal;
+  }
+  // Reset React 16/17/18 internal _valueTracker so React ALWAYS fires onChange!
+  const tracker = input._valueTracker;
+  if (tracker) {
+    tracker.setValue(prevVal === strVal ? "__force_diff__" : prevVal);
+  }
+  try {
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: strVal }));
+  } catch {
+    // fallback if InputEvent constructor options fail
   }
   input.dispatchEvent(new Event("input", { bubbles: true }));
   input.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+async function typeReactInputLikeHuman(input, text) {
+  const val = String(text ?? "").trim();
+  input.scrollIntoView({ behavior: "smooth", block: "center" });
+  await sleep(randMs(550, 950));
+  input.focus();
+  input.click();
+  await sleep(randMs(120, 220));
+
+  // ContentEditable / custom textbox (Coursera rich/math inputs)
+  if (input.isContentEditable || input.getAttribute("contenteditable") === "true") {
+    setReactInputValue(input, val);
+    await sleep(randMs(200, 380));
+    input.dispatchEvent(new Event("blur", { bubbles: true }));
+    return;
+  }
+
+  const inputType = (input.type || "text").toLowerCase();
+  // On <input type="number">, typing "-" alone is rejected by Chrome — set the full value atomically!
+  if (input.tagName === "INPUT" && inputType === "number") {
+    setReactInputValue(input, "");
+    await sleep(randMs(120, 200));
+    setReactInputValue(input, val);
+    if (String(input.value || "").trim() !== val) {
+      try {
+        input.select?.();
+        document.execCommand("insertText", false, val);
+      } catch {
+        // ignore
+      }
+      setReactInputValue(input, val);
+    }
+    await sleep(randMs(180, 320));
+    input.dispatchEvent(new Event("blur", { bubbles: true }));
+    return;
+  }
+
+  // Standard <input type="text"> / <textarea>: type char-by-char with React _valueTracker sync
+  setReactInputValue(input, "");
+  await sleep(randMs(140, 240));
+  let current = "";
+  for (const ch of val) {
+    current += ch;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: ch, bubbles: true }));
+    setReactInputValue(input, current);
+    input.dispatchEvent(new KeyboardEvent("keyup", { key: ch, bubbles: true }));
+    await sleep(randMs(45, 105));
+  }
+  if (String(input.value || "").trim() !== val) {
+    setReactInputValue(input, val);
+  }
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  input.dispatchEvent(new Event("blur", { bubbles: true }));
+}
+
+function getQuizTextInputElements(root = document, { allowDisabled = false } = {}) {
+  const candidates = Array.from(
+    root.querySelectorAll('input, textarea, [contenteditable="true"], [role="textbox"]')
+  ).filter((el) => isQuizTextInput(el, { allowDisabled }));
+  return candidates.filter((el) => !candidates.some((other) => other !== el && other.contains(el)));
+}
+
+function isQuizTextInput(el, { allowDisabled = false } = {}) {
+  if (!el) return false;
+  if (el.closest("#cs-helper-panel, nav, aside, [role='navigation'], header, footer")) return false;
+  if (!allowDisabled && (el.disabled || el.readOnly || el.getAttribute("aria-disabled") === "true")) return false;
+  if (!isVisible(el)) return false;
+
+  const tag = (el.tagName || "").toUpperCase();
+  const isEditableDiv = el.isContentEditable || el.getAttribute("contenteditable") === "true" || el.getAttribute("role") === "textbox";
+  if (tag === "INPUT") {
+    const t = (el.type || "text").toLowerCase();
+    if (["radio", "checkbox", "hidden", "submit", "button", "file", "password", "search", "range", "color", "date", "time"].includes(t)) {
+      return false;
+    }
+  } else if (tag !== "TEXTAREA" && !isEditableDiv) {
+    return false;
+  }
+
+  const ph = normalizeText(el.placeholder || el.getAttribute("aria-label") || "");
+  const around = normalizeText(el.closest("div")?.parentElement?.innerText || "");
+  if (
+    ph.includes("search") ||
+    ph.includes("full name") ||
+    ph.includes("legal name") ||
+    around.includes("full name") ||
+    around.includes("legal name") ||
+    matchesHonorCodeText(around)
+  ) {
+    return false;
+  }
+
+  const onQuizRoute = /\/(attempt|view-feedback|view-submission)/i.test(window.location.pathname);
+  return (
+    onQuizRoute ||
+    ph.includes("answer") ||
+    ph.includes("enter") ||
+    ph.includes("response") ||
+    ph.includes("value") ||
+    Boolean(el.closest('[data-testid^="part-Submission_"], .rc-FormPartsQuestion, [role="group"], main'))
+  );
 }
 
 // ---------------- Sidebar & Green-Tick Verification Gatekeeper ----------------
@@ -884,6 +1101,10 @@ setInterval(() => {
 function runAutoTick() {
   if (!autoMode) return;
   createPanel();
+  if (!hasApiKey()) {
+    setAutoMode(false);
+    return;
+  }
   silenceAllMedia({ pauseAudio: true });
 
   if (window.location.href !== lastUrl) {
@@ -1733,7 +1954,9 @@ function scrapeQuizFeedback(baseQuizKey) {
   ).filter((el) => {
     if (el.closest("#cs-helper-panel, nav, aside")) return false;
     if (!isVisible(el)) return false;
-    return el.querySelectorAll('input[type="radio"], input[type="checkbox"]').length >= 2;
+    const hasChoices = el.querySelectorAll('input[type="radio"], input[type="checkbox"]').length >= 2;
+    const hasText = Array.from(el.querySelectorAll("input, textarea")).some((inp) => isQuizTextInput(inp, { allowDisabled: true }));
+    return hasChoices || hasText;
   });
   const topContainers = containers.filter((el) => !containers.some((o) => o !== el && o.contains(el)));
 
@@ -1742,31 +1965,44 @@ function scrapeQuizFeedback(baseQuizKey) {
   let savedPartial = 0;
 
   for (const container of topContainers) {
+    const cChoices = container.querySelectorAll('input[type="radio"], input[type="checkbox"]').length;
+    const textInp = Array.from(container.querySelectorAll("input, textarea")).find((inp) =>
+      isQuizTextInput(inp, { allowDisabled: true })
+    );
+
     let qRoot = container;
     for (let up = 0; up < 4 && qRoot.parentElement; up++) {
       const p = qRoot.parentElement;
-      const pInputs = p.querySelectorAll('input[type="radio"], input[type="checkbox"]').length;
-      const cInputs = container.querySelectorAll('input[type="radio"], input[type="checkbox"]').length;
-      if (pInputs === cInputs && !p.closest("#cs-helper-panel")) {
+      const pChoices = p.querySelectorAll('input[type="radio"], input[type="checkbox"]').length;
+      const pTexts = Array.from(p.querySelectorAll("input, textarea")).filter((inp) =>
+        isQuizTextInput(inp, { allowDisabled: true })
+      ).length;
+      if (pChoices === cChoices && pTexts <= (textInp ? 1 : 0) && !p.closest("#cs-helper-panel")) {
         qRoot = p;
       } else {
         break;
       }
     }
 
-    const labels = Array.from(container.querySelectorAll("label")).filter((l) => isVisible(l));
-    const options = labels.map((l) => (l.innerText || "").replace(/\s+/g, " ").trim()).filter(Boolean);
-    if (options.length < 2) continue;
-
+    let options = [];
     const selectedOpts = [];
-    for (const lbl of labels) {
-      const inp =
-        lbl.querySelector('input[type="radio"], input[type="checkbox"]') ||
-        (lbl.htmlFor ? document.getElementById(lbl.htmlFor) : null);
-      if (inp && inp.checked) {
-        const txt = (lbl.innerText || "").replace(/\s+/g, " ").trim();
-        if (txt) selectedOpts.push(txt);
+
+    if (cChoices >= 2) {
+      const labels = Array.from(container.querySelectorAll("label")).filter((l) => isVisible(l));
+      options = labels.map((l) => (l.innerText || "").replace(/\s+/g, " ").trim()).filter(Boolean);
+      if (options.length < 2) continue;
+      for (const lbl of labels) {
+        const inp =
+          lbl.querySelector('input[type="radio"], input[type="checkbox"]') ||
+          (lbl.htmlFor ? document.getElementById(lbl.htmlFor) : null);
+        if (inp && inp.checked) {
+          const txt = (lbl.innerText || "").replace(/\s+/g, " ").trim();
+          if (txt) selectedOpts.push(txt);
+        }
       }
+    } else if (textInp) {
+      const typedVal = (textInp.value || "").trim();
+      if (typedVal) selectedOpts.push(typedVal);
     }
     if (!selectedOpts.length) continue;
 
@@ -1969,7 +2205,9 @@ function handleQuizPage() {
     const lbl = el.closest("label") || el.parentElement;
     return isVisible(el) || isVisible(lbl);
   }).length;
-  const isAttemptPage = path.includes("/attempt") || (!hasCoverActionBtn && enabledQuizInputsCount >= 2);
+  const enabledTextInputsCount = getQuizTextInputElements(document).length;
+  const hasAnyQuizQuestions = enabledQuizInputsCount >= 2 || enabledTextInputsCount >= 1;
+  const isAttemptPage = path.includes("/attempt") || (!hasCoverActionBtn && hasAnyQuizQuestions);
 
   if (isAttemptPage) {
     if (quizSubmittedUrls.has(baseQuizKey)) {
@@ -1978,7 +2216,7 @@ function handleQuizPage() {
     }
 
     // Wait for Coursera React quiz questions/options to actually finish rendering before calling Gemini!
-    if (enabledQuizInputsCount < 2) {
+    if (!hasAnyQuizQuestions) {
       setStatus("Waiting questions...", "#9ca3af");
       return;
     }
@@ -2130,11 +2368,13 @@ function handleOptionalOrFallbackPage() {
   goToNextItem(2500, "Moving Next...");
 }
 
-// ---------------- Structured Quiz Extraction (Per-Question) ----------------
+// ---------------- Structured Quiz Extraction (Per-Question: Radio + Checkbox + Written/Numeric Text Input) ----------------
 function extractQuestionBlocks() {
   const root = document.body;
+  const rawItems = [];
 
-  let containers = Array.from(
+  // 1. Objective (Radio & Checkbox) question containers
+  let choiceContainers = Array.from(
     root.querySelectorAll(
       '[data-testid^="part-Submission_"], .rc-FormPartsQuestion, [role="radiogroup"], [role="group"]'
     )
@@ -2145,11 +2385,11 @@ function extractQuestionBlocks() {
     return inputs.length >= 2;
   });
 
-  containers = containers.filter(
-    (el) => !containers.some((other) => other !== el && other.contains(el))
+  choiceContainers = choiceContainers.filter(
+    (el) => !choiceContainers.some((other) => other !== el && other.contains(el))
   );
 
-  const blocks = containers.map((container, index) => {
+  for (const container of choiceContainers) {
     let promptRoot = container;
     if (
       container.getAttribute("role") === "radiogroup" ||
@@ -2170,25 +2410,69 @@ function extractQuestionBlocks() {
     const labels = Array.from(container.querySelectorAll("label")).filter(
       (l) => !l.closest("#cs-helper-panel") && isVisible(l) && (l.innerText || "").trim().length > 0
     );
-
     const options = labels.map((l) => (l.innerText || "").replace(/\s+/g, " ").trim());
     const cleanOptions = labels.map((l) => extractCleanTextWithMath(l));
+    if (options.length < 2) continue;
     const fullText = extractCleanTextWithMath(promptRoot);
     const isMultiSelect = container.querySelectorAll('input[type="checkbox"]').length >= 2;
 
-    return {
-      q: index + 1,
+    rawItems.push({
+      type: isMultiSelect ? "checkbox" : "radio",
       container,
+      anchorEl: container,
       labels,
       options,
       cleanOptions,
+      textInput: null,
       fullText,
       isMultiSelect,
       qKey: getQuestionFingerprint(fullText, options)
-    };
+    });
+  }
+
+  // 2. Written / Numeric Text-Input questions ("Enter answer here", <input>, <textarea>, contenteditable)
+  const quizTextInputs = getQuizTextInputElements(root).filter((el) => {
+    if (choiceContainers.some((c) => c.contains(el))) return false;
+    return true;
   });
 
-  return blocks.filter((b) => b.options.length >= 2);
+  for (const inp of quizTextInputs) {
+    let qRoot =
+      inp.closest('[data-testid^="part-Submission_"], .rc-FormPartsQuestion') || inp.parentElement;
+    for (let up = 0; up < 8 && qRoot && qRoot.parentElement; up++) {
+      const p = qRoot.parentElement;
+      if (p === document.body || p.tagName === "MAIN" || p.closest("#cs-helper-panel")) break;
+      const pChoices = p.querySelectorAll('input[type="radio"], input[type="checkbox"]').length;
+      const pTexts = getQuizTextInputElements(p).length;
+      if (pChoices === 0 && pTexts === 1) {
+        qRoot = p;
+      } else {
+        break;
+      }
+    }
+    const fullText = extractCleanTextWithMath(qRoot || inp.parentElement || inp);
+    rawItems.push({
+      type: "text",
+      container: qRoot || inp.parentElement || inp,
+      anchorEl: inp,
+      labels: [],
+      options: [],
+      cleanOptions: [],
+      textInput: inp,
+      fullText,
+      isMultiSelect: false,
+      qKey: getQuestionFingerprint(fullText, [])
+    });
+  }
+
+  // Sort all questions in exact top-to-bottom DOM order so Q1, Q2, Q3... match Coursera numbering!
+  rawItems.sort((a, b) => {
+    if (a.anchorEl === b.anchorEl) return 0;
+    const pos = a.anchorEl.compareDocumentPosition(b.anchorEl);
+    return pos & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+  });
+
+  return rawItems.map((item, idx) => ({ ...item, q: idx + 1 }));
 }
 
 async function tickQuestionAnswers(blocks, results) {
@@ -2212,9 +2496,29 @@ async function tickQuestionAnswers(blocks, results) {
 
   for (let i = 0; i < results.length; i++) {
     const item = results[i];
-    const answers = (Array.isArray(item.answers) ? item.answers : [item.answers]).filter(Boolean);
+    const answers = (Array.isArray(item.answers) ? item.answers : [item.answers]).filter(
+      (a) => a !== null && a !== undefined && String(a).trim() !== ""
+    );
     const qNum = typeof item.q === "number" ? item.q : i + 1;
     const block = blocks.find((b) => b.q === qNum) || blocks[i] || null;
+
+    // Written / Numeric short-answer text input question -> type like CodeTantra!
+    if (block && block.type === "text" && block.textInput) {
+      const rawTyped = answers.length ? String(answers[0]).trim() : "";
+      totalExpected++;
+      if (rawTyped) {
+        setStatus(`Typing Q${qNum}...`, "#60a5fa");
+        await typeReactInputLikeHuman(block.textInput, rawTyped);
+        tickedCount++;
+        matchedLogs.push(`Q${qNum} ⌨️ ${rawTyped}`);
+        setStatus(`Typed Q${qNum} ✓`, "#86efac");
+        await sleep(randMs(1200, 2000));
+      } else {
+        missedLogs.push(`Q${qNum} ✗ (empty text answer)`);
+      }
+      continue;
+    }
+
     const searchLabels = block ? block.labels : globalLabels;
 
     // On resumed multi-select checkbox questions, uncheck any stale checked box that is NOT in the new answers!
@@ -2456,9 +2760,12 @@ async function discoverAvailableModels(apiKey) {
           const methods = m.supportedGenerationMethods || [];
           if (!methods.includes("generateContent")) return false;
           if (!name.startsWith("gemini-")) return false;
-          if (/(image|tts|live|audio|embed|robotics|transcribe|1\.5)/i.test(name)) {
+          // Exclude non-text, deprecated (1.5/2.0/2.5), and 0-quota paid/preview models (pro, 3.1-, customtools)
+          if (/(image|tts|live|audio|embed|robotics|transcribe|customtools|pro|1\.5|2\.0|2\.5|3\.1)/i.test(name)) {
             return false;
           }
+          // Bare gemini-3.5-flash has 0 free quota; keep gemini-3.5-flash-lite and 3.6/3.7/3.8-flash
+          if (name === "gemini-3.5-flash") return false;
           return true;
         })
         .map((m) => (m.name || "").replace(/^models\//, ""));
@@ -2469,18 +2776,16 @@ async function discoverAvailableModels(apiKey) {
           if (name.includes("3.6-flash")) return 2;
           if (name.includes("3.7-flash")) return 3;
           if (name.includes("3.8-flash")) return 4;
-          if (name.includes("2.5-flash-lite")) return 5;
-          if (name.includes("2.5-flash") && !name.includes("pro")) return 6;
-          if (name.includes("flash-latest")) return 7;
-          if (name.includes("2.0-flash")) return 8;
-          if (name.includes("flash")) return 9;
-          return 15;
+          if (name.includes("3.") && name.includes("flash")) return 5;
+          if (name.includes("flash-latest")) return 6;
+          if (name.includes("flash")) return 7;
+          return 12;
         };
         eligible.sort((a, b) => scoreModel(a) - scoreModel(b));
         const lastGood = localStorage.getItem("cs_last_working_model");
-        const topList = eligible.slice(0, 8);
+        const topList = eligible.slice(0, 6);
         if (lastGood && eligible.includes(lastGood)) {
-          cachedWorkingModels = [lastGood, ...topList.filter((m) => m !== lastGood)].slice(0, 8);
+          cachedWorkingModels = [lastGood, ...topList.filter((m) => m !== lastGood)].slice(0, 6);
         } else {
           cachedWorkingModels = topList;
         }
@@ -2494,7 +2799,7 @@ async function discoverAvailableModels(apiKey) {
   return FALLBACK_GEMINI_MODELS.slice(0, 5);
 }
 
-async function fetchWithTimeout(url, options, timeoutMs = 14000) {
+async function fetchWithTimeout(url, options, timeoutMs = 35000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -2506,15 +2811,26 @@ async function fetchWithTimeout(url, options, timeoutMs = 14000) {
 
 async function callGeminiWithFallback(prompt, useStrongModel = false) {
   const apiKey = getApiKey();
+  if (!apiKey) {
+    return {
+      ok: false,
+      error: "Coursera Agent mein koi API Key set nahi hai. Pehle 'Set Key' dabakar apna alag Gemini API Key dalo.",
+      retryable: false
+    };
+  }
   let models = await discoverAvailableModels(apiKey);
   if (useStrongModel && models.length > 1) {
-    // On retry (<80%), prefer a stronger non-lite model first if available
-    const strongFirst = [...models].sort((a, b) => (a.includes("lite") ? 1 : 0) - (b.includes("lite") ? 1 : 0));
+    // On retry, prefer gemini-3.6-flash first, then gemini-3.5-flash-lite
+    const strongFirst = [...models].sort((a, b) => {
+      const rank = (m) => (m.includes("3.6-flash") ? 1 : m.includes("3.5-flash-lite") ? 2 : 3);
+      return rank(a) - rank(b);
+    });
     models = strongFirst;
   }
 
   const errorLogs = [];
   let sawRetryable = false;
+  let quotaCount = 0;
 
   for (const model of models) {
     const shortName = model.replace("gemini-", "");
@@ -2533,7 +2849,7 @@ async function callGeminiWithFallback(prompt, useStrongModel = false) {
             }
           })
         },
-        14000
+        35000
       );
 
       const data = await res.json().catch(() => ({}));
@@ -2551,9 +2867,10 @@ async function callGeminiWithFallback(prompt, useStrongModel = false) {
 
       const errMsg = data?.error?.message || `HTTP ${res.status}`;
       errorLogs.push(`${model} (${res.status}): ${errMsg.slice(0, 90)}`);
+      if (res.status === 429) quotaCount++;
 
       if (res.status === 400 && /api key not valid/i.test(errMsg)) {
-        return { ok: false, error: `API Key invalid hai! 'Key' button dabakar sahi Gemini API Key dalo.\n${errMsg}`, retryable: false };
+        return { ok: false, error: `API Key invalid hai! 'Set Key' button dabakar sahi Gemini API Key dalo.\n${errMsg}`, retryable: false, allQuota: false };
       }
 
       if (RETRYABLE_HTTP_CODES.has(res.status)) {
@@ -2562,17 +2879,22 @@ async function callGeminiWithFallback(prompt, useStrongModel = false) {
         continue;
       }
 
-      return { ok: false, error: errorLogs.join("\n"), retryable: false };
+      return { ok: false, error: errorLogs.join("\n"), retryable: false, allQuota: false };
     } catch (err) {
       sawRetryable = true;
-      const msg = err.name === "AbortError" ? "Timeout (14s)" : err.message;
+      const msg = err.name === "AbortError" ? "Timeout (35s)" : err.message;
       errorLogs.push(`${model}: ${msg}`);
       await sleep(350);
     }
   }
 
   cachedWorkingModels = null;
-  return { ok: false, error: errorLogs.slice(-3).join("\n") || "All Gemini models failed.", retryable: sawRetryable };
+  return {
+    ok: false,
+    error: errorLogs.slice(-3).join("\n") || "All Gemini models failed.",
+    retryable: sawRetryable,
+    allQuota: models.length > 0 && quotaCount === models.length
+  };
 }
 
 async function solveQuiz({ autoSubmit = false, baseQuizKey = null, useStrongModel = false } = {}) {
@@ -2602,9 +2924,12 @@ async function solveQuiz({ autoSubmit = false, baseQuizKey = null, useStrongMode
         const locked = quizMem.correct[b.qKey];
         const partial = quizMem.partial?.[b.qKey];
         const banned = quizMem.wrong[b.qKey];
-        let hint = b.isMultiSelect
-          ? `\n[QUESTION TYPE: MULTIPLE-SELECT CHECKBOXES — TEST EVERY OPTION INDEPENDENTLY AND RETURN ALL TRUE OPTIONS IN "answers" ARRAY!]`
-          : `\n[QUESTION TYPE: SINGLE-CHOICE RADIO — RETURN EXACTLY ONE OPTION]`;
+        let hint =
+          b.type === "text"
+            ? `\n[QUESTION TYPE: SHORT-ANSWER / NUMERIC TEXT INPUT — SOLVE ACCURATELY AND RETURN ONLY THE EXACT CONCISE VALUE TO TYPE IN "answers" ARRAY, e.g. ["-2"] or ["2"], NO EXTRA WORDS OR PREFIXES!]`
+            : b.isMultiSelect
+              ? `\n[QUESTION TYPE: MULTIPLE-SELECT CHECKBOXES — TEST EVERY OPTION INDEPENDENTLY AND RETURN ALL TRUE OPTIONS IN "answers" ARRAY!]`
+              : `\n[QUESTION TYPE: SINGLE-CHOICE RADIO — RETURN EXACTLY ONE OPTION]`;
         if (locked && locked.length) {
           hint += `\n[CONFIRMED 100% CORRECT FROM PREVIOUS ATTEMPT — MUST PICK EXACTLY THIS]: ${locked.join(" | ")}`;
         }
@@ -2613,6 +2938,9 @@ async function solveQuiz({ autoSubmit = false, baseQuizKey = null, useStrongMode
         }
         if (banned && banned.length) {
           hint += `\n[CONFIRMED WRONG FROM PREVIOUS ATTEMPT — NEVER PICK THESE AGAIN]: ${banned.join(" | ")}`;
+        }
+        if (b.type === "text") {
+          return `=== Question ${b.q} ===\n${b.fullText}${hint}\nInput Field: [Free-text / Numeric box]`;
         }
         const optLines = b.options
           .map((o, idx) => {
@@ -2628,7 +2956,7 @@ async function solveQuiz({ autoSubmit = false, baseQuizKey = null, useStrongMode
     quizPayloadText = (mainContent.innerText || "").slice(0, 18000);
   }
 
-  const prompt = `You are a senior computer science professor solving a Coursera quiz. Carefully trace every line of code (check 0-based indexing, array bounds, types, exceptions, edge cases) and verify every concept so that you score 100%.
+  const prompt = `You are a senior computer science and mathematics professor solving a Coursera quiz. Carefully solve every linear algebra/math equation, matrix rank/determinant, and code trace step-by-step internally so that you score 100%.
 
 Return ONLY valid JSON in this exact format:
 {
@@ -2641,21 +2969,30 @@ Return ONLY valid JSON in this exact format:
 }
 
 Strict Rules:
-- Copy each correct option text EXACTLY verbatim from "Available Options" (do not add "A.", "B.", bullets, or extra text).
+- For radio/checkbox questions: Copy each correct option text EXACTLY verbatim from "Available Options" (do not add "A.", "B.", bullets, or extra text, and do not append "[Math: ...]").
+- For multiple-select questions ("Select all that apply" / "Check all"): Test every option independently and include ALL true option strings in the "answers" array.
+- For SHORT-ANSWER / NUMERIC TEXT INPUT questions: Put ONLY the final exact value to type into the input box (e.g. ["2"], ["-14"], ["0.5"]), using plain ASCII minus '-' and no extra words like "z = " unless explicitly requested.
 - Answer EVERY question in order (q: 1, 2, 3, ...).
-- For multiple-select questions ("Select all that apply"), include ALL correct option strings in the "answers" array.
 - Do not include explanations or markdown outside the JSON object.
 
 Quiz Content:
 ${quizPayloadText}`;
 
-  const scheduleRetryOrPause = (reason, { retryable = true } = {}) => {
+  const scheduleRetryOrPause = (reason, { retryable = true, allQuota = false } = {}) => {
     if (!baseQuizKey) return;
+    if (allQuota) {
+      quizCooldownUntil[baseQuizKey] = Date.now() + 45000;
+      setStatus("API Quota Full -> Change Key", "#f87171");
+      setOutput(
+        "Is Gemini API Key ka quota khatam ho gaya hai (429).\n\nFix: Upar 'Key' button dabakar apna naya/dusra free Gemini API Key (aistudio.google.com/apikey) paste karo — turant chal padega!\n\n(45s mein phir check karega.)"
+      );
+      return;
+    }
     if (retryable) {
-      // Never permanently pause on temporary 503/429 spikes — auto-retry quickly after 5s!
-      quizCooldownUntil[baseQuizKey] = Date.now() + 5000;
-      setStatus("API busy (retry 5s)", "#facc15");
-      if (reason) setOutput(`${reason}\n\n5 सेकंड में अपने-आप फिर कोशिश करेगा... (अगर CodeTantra भी इसी Key पर चल रहा है तो ऊपर 'Key' बटन से Coursera के लिए अलग Key डाल सकते हो)`);
+      // Never permanently pause on temporary 503/429 spikes — auto-retry quickly after 8s!
+      quizCooldownUntil[baseQuizKey] = Date.now() + 8000;
+      setStatus("API busy (retry 8s)", "#facc15");
+      if (reason) setOutput(`${reason}\n\n8 सेकंड में अपने-आप फिर कोशिश करेगा... (अगर CodeTantra भी इसी Key पर चल रहा है तो ऊपर 'Key' बटन से Coursera के लिए अलग Key डाल सकते हो)`);
       return;
     }
     const errs = (quizSolveErrorCounts[baseQuizKey] || 0) + 1;
@@ -2725,8 +3062,10 @@ ${quizPayloadText}`;
 // ---------------- Boot ----------------
 setTimeout(() => {
   createPanel();
-  if (autoMode) {
+  if (autoMode && hasApiKey()) {
     setAutoMode(true);
+  } else if (autoMode && !hasApiKey()) {
+    setAutoMode(false);
   }
 }, 1800);
 

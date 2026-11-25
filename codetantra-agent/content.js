@@ -1,11 +1,33 @@
-const DEFAULT_GEMINI_API_KEY = "";
+const CT_API_KEY_STORAGE = "codetantra_only_gemini_api_key_v1";
+const LEGACY_SHARED_STORAGE_KEYS = [
+  "cs_gemini_api_key",
+  "ct_gemini_api_key",
+  "gemini_api_key",
+  "coursera_gemini_api_key",
+  "coursera_only_gemini_api_key_v1"
+];
+const SHARED_KEY_BLOCK_MSG =
+  "Same/Shared API Key blocked! Coursera aur CodeTantra mein alag-alag API Key dalna zaroori hai.";
 
-const FALLBACK_GEMINI_MODELS = [
-  "gemini-3.5-flash-lite",
-  "gemini-3.6-flash",
-  "gemini-3.7-flash",
-  "gemini-3.8-flash",
-  "gemini-2.5-flash"
+// Purge any old or shared storage keys immediately on load
+try {
+  for (const oldKey of LEGACY_SHARED_STORAGE_KEYS) {
+    localStorage.removeItem(oldKey);
+  }
+  // One-time seed of user-verified CodeTantra-only key (if cleared via Set Key, never re-seeds)
+  if (localStorage.getItem("ct_seeded_key_5cfg") !== "done") {
+    if (!localStorage.getItem(CT_API_KEY_STORAGE)) {
+      localStorage.setItem(CT_API_KEY_STORAGE, "");
+    }
+    localStorage.setItem("ct_seeded_key_5cfg", "done");
+  }
+} catch {}
+
+// Live-benchmarked best models: gemini-3-flash-preview is #1 (2/2 OK, 0% 503, ~3.3s)
+const VERIFIED_WORKING_MODELS = [
+  "gemini-3-flash-preview",
+  "gemini-flash-lite-latest",
+  "gemini-3.5-flash-lite"
 ];
 
 let cachedModelsByKey = new Map();
@@ -15,7 +37,7 @@ let apiCooldownUntil = 0;
 const RETRYABLE_HTTP_CODES = new Set([400, 403, 404, 408, 429, 500, 502, 503, 504]);
 const MAX_FIX_ATTEMPTS = 3;
 
-let autoMode = sessionStorage.getItem("ct_auto_mode") === "true";
+let autoMode = false;
 let autoInterval = null;
 let isBusy = false;
 let tickInFlight = false;
@@ -25,18 +47,63 @@ let slideEnteredAt = Date.now();
 let pendingBridgeCalls = new Map();
 let msgCounter = 1;
 
-function getApiKeys() {
-  const raw = (localStorage.getItem("ct_gemini_api_key") || "").trim();
-  const list = raw
+function isBlockedOrSharedKey(key) {
+  const k = (key || "").trim();
+  if (!k) return false;
+  if (k.startsWith("AQ.Ab8RN6") && k.endsWith("9IQiA")) return true;
+  if (/coursera/i.test(k)) return true;
+  return false;
+}
+
+function purgeBlockedOrInvalidStoredKey() {
+  const raw = (localStorage.getItem(CT_API_KEY_STORAGE) || "").trim();
+  if (!raw) return { blocked: false, keys: [] };
+  const tokens = raw
     .split(/[\s,;]+/)
     .map((k) => k.trim())
-    .filter((k) => k.length > 15);
-  if (!list.includes(DEFAULT_GEMINI_API_KEY)) list.push(DEFAULT_GEMINI_API_KEY);
-  return list;
+    .filter(Boolean);
+  if (tokens.some((k) => isBlockedOrSharedKey(k))) {
+    localStorage.removeItem(CT_API_KEY_STORAGE);
+    localStorage.removeItem("ct_last_working_model");
+    cachedModelsByKey.clear();
+    failedModelUntil.clear();
+    autoMode = false;
+    sessionStorage.setItem("ct_auto_mode", "false");
+    if (autoInterval) {
+      clearInterval(autoInterval);
+      autoInterval = null;
+    }
+    return { blocked: true, keys: [] };
+  }
+  const valid = tokens.filter((k) => k.length >= 20);
+  return { blocked: false, keys: valid };
+}
+
+function getApiKeys() {
+  const check = purgeBlockedOrInvalidStoredKey();
+  if (check.blocked) {
+    syncKeyBtn();
+    syncAutoUI();
+    setStatus("Shared Key Blocked", "#f87171");
+    setOutput(SHARED_KEY_BLOCK_MSG);
+    return [];
+  }
+  return check.keys;
 }
 
 function getApiKey() {
-  return getApiKeys()[0];
+  return getApiKeys()[0] || "";
+}
+
+function hasValidApiKey() {
+  return getApiKeys().length > 0;
+}
+
+if (hasValidApiKey() && sessionStorage.getItem("ct_auto_mode") === "true") {
+  autoMode = true;
+} else {
+  autoMode = false;
+  sessionStorage.setItem("ct_auto_mode", "false");
 }
 
 function sleep(ms) {
@@ -142,6 +209,18 @@ function createPanel() {
         border-color: rgba(255, 255, 255, 0.45);
         color: #ffffff;
       }
+      .ct-key-missing {
+        background: rgba(127, 29, 29, 0.78) !important;
+        border-color: rgba(248, 113, 113, 0.70) !important;
+        color: #fecaca !important;
+        font-weight: 600;
+      }
+      .ct-key-active {
+        background: rgba(20, 83, 45, 0.74) !important;
+        border-color: rgba(134, 239, 172, 0.60) !important;
+        color: #bbf7d0 !important;
+        font-weight: 600;
+      }
     `;
     document.head.appendChild(styleTag);
   }
@@ -155,22 +234,22 @@ function createPanel() {
     -webkit-backdrop-filter: blur(10px) saturate(150%);
     color: #ffffff;
     border: 1px solid rgba(255, 255, 255, 0.24);
-    border-radius: 16px; padding: 13px; width: 325px;
+    border-radius: 16px; padding: 13px; width: 355px;
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.28);
     font-size: 12.5px;
   `;
 
   panel.innerHTML = `
-    <div style="font-weight: 600; margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center;">
-      <span style="display:flex; align-items:center; gap:6px;">
-        <span style="color:#ffffff;">CodeTantra Agent</span>
-        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v6.8</span>
-        <button id="ct-set-key" class="ct-icon-btn" title="Set custom Gemini API Key">Key</button>
+    <div style="font-weight: 600; margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center; gap:6px;">
+      <span style="display:flex; align-items:center; gap:4px; flex-wrap:nowrap;">
+        <span style="color:#ffffff; white-space:nowrap;">CodeTantra</span>
+        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 5px; border-radius:6px;">v7.3</span>
+        <button id="ct-set-key" class="ct-icon-btn ct-key-missing" title="Set CodeTantra-only Gemini API Key">Set Key</button>
         <button id="ct-scan-top" class="ct-icon-btn" title="Jump to topmost incomplete pink question">Top</button>
         <button id="ct-lang-btn" class="ct-icon-btn" title="Preferred language for multi-lang editors">Lang</button>
       </span>
-      <span id="ct-status" style="color:#e5e7eb; font-size:11px; font-weight:500; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">Idle</span>
+      <span id="ct-status" style="color:#e5e7eb; font-size:11px; font-weight:500; max-width:112px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">Idle</span>
     </div>
     <div style="display:flex; gap:8px; margin-bottom:2px;">
       <button id="ct-toggle-auto" class="ct-glass-btn">
@@ -189,6 +268,10 @@ function createPanel() {
     if (isBusy) {
       callBridge("STOP_TYPING");
       setStatus("Stopping...", "#facc15");
+      return;
+    }
+    if (!hasValidApiKey()) {
+      showApiKeyRequired();
       return;
     }
     apiCooldownUntil = 0;
@@ -219,21 +302,105 @@ function createPanel() {
       setStatus("None found", "#facc15");
     }
   });
-  document.getElementById("ct-set-key").addEventListener("click", () => {
-    const curRaw = localStorage.getItem("ct_gemini_api_key") || getApiKey();
-    const newKey = prompt("1 ya multiple Gemini API Keys paste karo (comma se separate karke — 429 aane par auto-rotate hoga):", curRaw);
-    if (newKey && newKey.trim()) {
-      localStorage.setItem("ct_gemini_api_key", newKey.trim());
-      cachedModelsByKey.clear();
-      failedModelUntil.clear();
-      apiCooldownUntil = 0;
-      const count = getApiKeys().length;
-      setStatus(`Keys saved (${count}) ✓`, "#86efac");
-      setOutput(`${count} Gemini API Key(s) active hain — quota/429 aane par automatically next key use hogi.`);
+  document.getElementById("ct-set-key").addEventListener("click", async () => {
+    const curRaw = localStorage.getItem(CT_API_KEY_STORAGE) || "";
+    const newKey = prompt(
+      "Sirf CodeTantra ke liye alag Gemini API Key paste karo (20+ chars; comma se multiple keys bhi daal sakte ho). Khali chhod kar OK dabane par key remove ho jayegi:",
+      curRaw
+    );
+    if (newKey === null) return;
+
+    const cleaned = newKey.replace(/["'`]/g, "").trim();
+    cachedModelsByKey.clear();
+    failedModelUntil.clear();
+    apiCooldownUntil = 0;
+
+    // Empty OK => remove saved key and immediately lock/stop agent
+    if (!cleaned) {
+      localStorage.removeItem(CT_API_KEY_STORAGE);
+      localStorage.removeItem("ct_last_working_model");
+      setAutoMode(false);
+      syncKeyBtn();
+      setStatus("API Key Required", "#f87171");
+      setOutput("CodeTantra API Key remove kar di gayi hai. Agent lock ho gaya hai — chalane ke liye 'Set Key' se nayi key daalo.");
+      return;
     }
+
+    const tokens = cleaned
+      .split(/[\s,;]+/)
+      .map((k) => k.trim())
+      .filter(Boolean);
+
+    // Block shared/Coursera keys immediately
+    if (tokens.some((k) => isBlockedOrSharedKey(k))) {
+      localStorage.removeItem(CT_API_KEY_STORAGE);
+      localStorage.removeItem("ct_last_working_model");
+      setAutoMode(false);
+      syncKeyBtn();
+      setStatus("Shared Key Blocked", "#f87171");
+      setOutput(SHARED_KEY_BLOCK_MSG);
+      return;
+    }
+
+    const validKeys = tokens.filter((k) => k.length >= 20);
+    if (!validKeys.length) {
+      localStorage.removeItem(CT_API_KEY_STORAGE);
+      setAutoMode(false);
+      syncKeyBtn();
+      setStatus("API Key Required", "#f87171");
+      setOutput("Invalid API Key! Kam se kam 20 characters ki CodeTantra-only Gemini API Key daalo.");
+      return;
+    }
+
+    localStorage.setItem(CT_API_KEY_STORAGE, validKeys.join(","));
+    syncKeyBtn();
+    setStatus("Testing key...", "#60a5fa");
+    const report = [];
+    for (let i = 0; i < validKeys.length; i++) {
+      const last4 = validKeys[i].slice(-4);
+      try {
+        const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(validKeys[i])}`);
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && Array.isArray(d.models)) {
+          report.push(`Key ${i + 1} (..${last4}): Valid ✓ (${d.models.length} models)`);
+        } else {
+          report.push(`Key ${i + 1} (..${last4}): ERROR ${r.status} (${(d?.error?.message || "Invalid").slice(0, 55)})`);
+        }
+      } catch (e) {
+        report.push(`Key ${i + 1} (..${last4}): Network error (${e.message})`);
+      }
+    }
+    const anyOk = report.some((line) => line.includes("Valid ✓"));
+    setStatus(anyOk ? `Key ..${validKeys[0].slice(-4)} ✓` : "Key Error!", anyOk ? "#86efac" : "#f87171");
+    setOutput(report.join("\n"));
   });
 
+  syncKeyBtn();
   syncAutoUI();
+}
+
+function syncKeyBtn() {
+  const keyBtn = document.getElementById("ct-set-key");
+  if (!keyBtn) return;
+  const check = purgeBlockedOrInvalidStoredKey();
+  const primary = check.keys[0] || "";
+  if (primary && primary.length >= 20) {
+    keyBtn.innerText = `Key ..${primary.slice(-4)}`;
+    keyBtn.classList.remove("ct-key-missing");
+    keyBtn.classList.add("ct-key-active");
+    keyBtn.title = `CodeTantra-only API Key active (..${primary.slice(-4)}) — click to change or clear`;
+  } else {
+    keyBtn.innerText = "Set Key";
+    keyBtn.classList.remove("ct-key-active");
+    keyBtn.classList.add("ct-key-missing");
+    keyBtn.title = "Set CodeTantra-only Gemini API Key (required)";
+  }
+}
+
+function showApiKeyRequired() {
+  syncKeyBtn();
+  setStatus("API Key Required", "#f87171");
+  setOutput("CodeTantra-only Gemini API Key set nahi hai! Upar red 'Set Key' button dabakar apna alag CodeTantra API Key (20+ chars) daalo.");
 }
 
 function setStatus(text, color = "#e5e7eb") {
@@ -261,18 +428,34 @@ function clearOutput() {
 function syncAutoUI() {
   const btn = document.getElementById("ct-toggle-auto");
   if (!btn) return;
-  if (autoMode) {
+  if (autoMode && hasValidApiKey()) {
     btn.innerText = "Stop Auto";
     btn.classList.add("ct-glass-btn-running");
     setStatus("Running...", "#86efac");
   } else {
     btn.innerText = "Start Auto";
     btn.classList.remove("ct-glass-btn-running");
-    setStatus("Stopped", "#d1d5db");
+    if (!hasValidApiKey()) {
+      setStatus("API Key Required", "#f87171");
+    } else {
+      setStatus("Stopped", "#d1d5db");
+    }
   }
 }
 
 function setAutoMode(enabled) {
+  if (enabled && !hasValidApiKey()) {
+    autoMode = false;
+    sessionStorage.setItem("ct_auto_mode", "false");
+    if (autoInterval) {
+      clearInterval(autoInterval);
+      autoInterval = null;
+    }
+    syncAutoUI();
+    showApiKeyRequired();
+    return;
+  }
+
   autoMode = enabled;
   sessionStorage.setItem("ct_auto_mode", enabled ? "true" : "false");
   syncAutoUI();
@@ -305,7 +488,7 @@ function formatNumberedCode(code, lockedLines = []) {
     .join("\n");
 }
 
-// ---------------- Dynamic Model Discovery + Diverse Quota Buckets + Multi-Key Rotation ----------------
+// ---------------- Dynamic Model Discovery + Verified Working Models First ----------------
 async function discoverAvailableModels(apiKey) {
   const cached = cachedModelsByKey.get(apiKey);
   if (cached && cached.length > 0) {
@@ -318,78 +501,37 @@ async function discoverAvailableModels(apiKey) {
     );
     const data = await res.json().catch(() => ({}));
     if (res.ok && Array.isArray(data.models)) {
-      const eligible = data.models
-        .filter((m) => {
-          const name = (m.name || "").replace(/^models\//, "");
-          const methods = m.supportedGenerationMethods || [];
-          if (!methods.includes("generateContent")) return false;
-          if (!name.startsWith("gemini-") && !name.startsWith("gemma-3-")) return false;
-          // Drop broken/overloaded preview & deprecated models immediately!
-          if (/(image|tts|live|audio|embed|robotics|transcribe|1\.5|2\.0|2\.5-flash-lite|2\.5-flash$|2\.5-pro$|3\.1-flash-lite|gemma-3-1b|gemma-3-4b)/i.test(name)) {
-            return false;
-          }
-          return true;
-        })
-        .map((m) => (m.name || "").replace(/^models\//, ""));
+      const availableSet = new Set(
+        data.models
+          .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent"))
+          .map((m) => (m.name || "").replace(/^models\//, ""))
+      );
 
-      if (eligible.length > 0) {
-        // Put stable, fast, non-503 models & Gemma-3-27B FIRST; overloaded flash-lite at the back!
-        const scoreModel = (name) => {
-          if (name === "gemini-flash-latest") return 1;
-          if (name.includes("3.6-flash")) return 2;
-          if (name.includes("3.7-flash")) return 3;
-          if (name.includes("3.8-flash")) return 4;
-          if (name === "gemma-3-27b-it") return 5;
-          if (name === "gemini-pro-latest") return 6;
-          if (name.includes("flash") && !name.includes("lite")) return 7;
-          if (name === "gemma-3-12b-it") return 8;
-          if (name.includes("3.5-flash-lite")) return 9;
-          if (name.includes("flash-lite")) return 10;
-          return 12;
-        };
-        eligible.sort((a, b) => scoreModel(a) - scoreModel(b));
-
-        const familyOf = (n) => {
-          if (n.includes("gemma-3-27b")) return "gemma27";
-          if (n.includes("gemma-3-12b")) return "gemma12";
-          if (n.includes("flash-lite")) return "flash-lite";
-          if (n.includes("3.6")) return "g36";
-          if (n.includes("3.7")) return "g37";
-          if (n.includes("3.8")) return "g38";
-          if (n.includes("pro")) return "pro";
-          return n;
-        };
-        const diverse = [];
-        const seenFam = new Set();
-        for (const m of eligible) {
-          const fam = familyOf(m);
-          if (!seenFam.has(fam)) {
-            seenFam.add(fam);
-            diverse.push(m);
-          }
-          if (diverse.length >= 8) break;
-        }
-        if (eligible.includes("gemma-3-27b-it") && !diverse.includes("gemma-3-27b-it")) {
-          diverse.push("gemma-3-27b-it");
-        }
-
-        const lastGood = localStorage.getItem("ct_last_working_model");
-        const finalList =
-          lastGood && eligible.includes(lastGood)
-            ? [lastGood, ...diverse.filter((m) => m !== lastGood)].slice(0, 8)
-            : diverse.slice(0, 8);
-        cachedModelsByKey.set(apiKey, finalList);
-        return finalList;
+      // Keep ONLY live-verified working models first so we NEVER waste time on retired 404 or paid-only 429 models
+      const prioritized = VERIFIED_WORKING_MODELS.filter((m) => availableSet.has(m));
+      const extras = [...availableSet].filter(
+        (name) =>
+          !prioritized.includes(name) &&
+          (name.startsWith("gemini-") || name.startsWith("gemma-4-")) &&
+          !/(image|tts|live|audio|embed|robotics|transcribe|imagen|veo|lyria|customtools|computer|1\.0|1\.5|2\.0|2\.5|3\.6|3\.7|3\.8|pro|omni|nano|antigravity|deep-research|gemini-4-)/i.test(
+            name
+          )
+      );
+      // Always keep gemini-3-flash-preview FIRST (never let stale flash-lite override it!)
+      const combined = [...prioritized, ...extras].slice(0, 5);
+      if (combined.length > 0) {
+        cachedModelsByKey.set(apiKey, combined);
+        return combined;
       }
     }
   } catch {
-    // Fall back to static list
+    // Fall back to live-verified list
   }
 
-  return ["gemini-flash-latest", "gemma-3-27b-it", ...FALLBACK_GEMINI_MODELS];
+  return [...VERIFIED_WORKING_MODELS];
 }
 
-async function fetchWithTimeout(url, options, timeoutMs = 10000) {
+async function fetchWithTimeout(url, options, timeoutMs = 45000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -411,6 +553,13 @@ function extractJsonFromText(raw) {
 
 async function callGemini(prompt) {
   const apiKeys = getApiKeys();
+  if (!apiKeys.length) {
+    return {
+      ok: false,
+      error: "Koi valid Gemini API Key set nahi hai! Upar 'Key' button dabakar apni AIza... key paste karo."
+    };
+  }
+
   const errorLogs = [];
   const now = Date.now();
 
@@ -418,13 +567,14 @@ async function callGemini(prompt) {
     const apiKey = apiKeys[kIdx];
     const models = await discoverAvailableModels(apiKey);
 
-    // Skip models blacklisted in the last 4 minutes for 503/429/Timeout (unless ALL are blacklisted)
+    // Skip models blacklisted in the last 4 minutes for 503/429/404 (unless ALL are blacklisted)
     const healthyModels = models.filter((m) => (failedModelUntil.get(`${kIdx}:${m}`) || 0) <= now);
     const runModels = healthyModels.length ? healthyModels : models;
 
     for (const model of runModels) {
       const isGemma = model.startsWith("gemma-");
       setStatus(`AI: ${model.replace("gemini-", "")} (K${kIdx + 1})`, "#60a5fa");
+      setOutput(`Code generate kar raha hoon...\nModel: ${model} (Key ${kIdx + 1}/${apiKeys.length})${errorLogs.length ? "\nLast skipped: " + errorLogs[errorLogs.length - 1] : ""}`);
       try {
         const bodyObj = {
           contents: [{ parts: [{ text: prompt }] }]
@@ -433,6 +583,8 @@ async function callGemini(prompt) {
           bodyObj.generationConfig = { responseMimeType: "application/json" };
         }
 
+        // 45s timeout so long DSA solutions (like B-Tree / HeapSort) NEVER get killed mid-generation!
+        // Fast errors (404 / 429 / 503) still return in <1s and switch immediately.
         const res = await fetchWithTimeout(
           `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
           {
@@ -440,7 +592,7 @@ async function callGemini(prompt) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(bodyObj)
           },
-          10000
+          45000
         );
 
         const data = await res.json().catch(() => ({}));
@@ -458,9 +610,10 @@ async function callGemini(prompt) {
         }
 
         const errMsg = data?.error?.message || `HTTP ${res.status}`;
-        errorLogs.push(`K${kIdx + 1}/${model} (${res.status}): ${errMsg.slice(0, 75)}`);
+        errorLogs.push(`K${kIdx + 1}/${model} (${res.status}): ${errMsg.slice(0, 80)}`);
 
-        if (res.status === 400 && /api key not valid/i.test(errMsg)) {
+        // Invalid or permission-denied key: skip rest of models for THIS key immediately
+        if (res.status === 403 || (res.status === 400 && /api key not valid/i.test(errMsg))) {
           break;
         }
         // Blacklist broken/overloaded/quota-hit model for 4 minutes so it never wastes time again!
@@ -473,7 +626,7 @@ async function callGemini(prompt) {
           continue;
         }
       } catch (err) {
-        const msg = err.name === "AbortError" ? "Timeout (10s)" : err.message;
+        const msg = err.name === "AbortError" ? "Timeout (45s)" : err.message;
         failedModelUntil.set(`${kIdx}:${model}`, Date.now() + 240000);
         errorLogs.push(`K${kIdx + 1}/${model}: ${msg}`);
       }
@@ -482,15 +635,19 @@ async function callGemini(prompt) {
 
   const hitQuota = errorLogs.some((e) => e.includes("(429)") || /quota/i.test(e));
   const hitBusy = errorLogs.some((e) => e.includes("(503)") || /high demand/i.test(e));
+  const hitDenied = errorLogs.some((e) => e.includes("(403)") || /api key not valid/i.test(e));
   apiCooldownUntil = Date.now() + (hitQuota ? 40000 : 20000);
+  const shownLogs = errorLogs.length <= 5 ? errorLogs : [...errorLogs.slice(0, 2), "...", ...errorLogs.slice(-2)];
   return {
     ok: false,
     error:
       (hitQuota
-        ? "Aaj ka free Gemini API quota khatam ho gaya (429)! 'Key' dabakar doosre Gmail ka naya free API key paste karo (comma se multiple keys bhi daal sakte ho).\n"
+        ? "Is key par aaj ka free Gemini quota (429) khatam ho gaya! 'Key' dabakar naya Gmail API key paste karo (purana hata kar ya comma se).\n"
+        : hitDenied
+        ? "API Key invalid ya blocked hai (403) — 'Key' dabakar aistudio.google.com/apikey se nayi AIza... key paste karo.\n"
         : hitBusy
         ? "Google Gemini server abhi high demand par hai (503) — 20s baad khud retry karega.\n"
-        : "") + (errorLogs.slice(-3).join("\n") || "All Gemini models failed.")
+        : "") + (shownLogs.join("\n") || "All Gemini models failed.")
   };
 }
 
@@ -1051,6 +1208,11 @@ Return ONLY valid JSON:
 
 // ---------------- Unified Slide Dispatcher ----------------
 async function solveCurrentSlide({ autoSubmitAndNext = false } = {}) {
+  if (!hasValidApiKey()) {
+    if (autoMode) setAutoMode(false);
+    showApiKeyRequired();
+    return;
+  }
   if (isBusy) return;
   isBusy = true;
 
@@ -1085,6 +1247,11 @@ async function solveCurrentSlide({ autoSubmitAndNext = false } = {}) {
 
 async function runAutoTick() {
   if (!autoMode || isBusy || tickInFlight) return;
+  if (!hasValidApiKey()) {
+    setAutoMode(false);
+    showApiKeyRequired();
+    return;
+  }
   tickInFlight = true;
   try {
     createPanel();
@@ -1184,7 +1351,14 @@ async function runAutoTick() {
 // ---------------- Boot ----------------
 setTimeout(() => {
   createPanel();
-  if (autoMode) setAutoMode(true);
+  syncKeyBtn();
+  if (!hasValidApiKey()) {
+    autoMode = false;
+    sessionStorage.setItem("ct_auto_mode", "false");
+    syncAutoUI();
+  } else if (autoMode) {
+    setAutoMode(true);
+  }
 }, 400);
 
 setInterval(() => {
