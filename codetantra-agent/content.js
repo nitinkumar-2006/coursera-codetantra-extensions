@@ -21,6 +21,11 @@ try {
     }
     localStorage.setItem("ct_seeded_key_5cfg", "done");
   }
+  // v9.4: Always respect CodeTantra's manual language dropdown (clear old forced JAVA override)
+  if (localStorage.getItem("ct_v94_lang_reset") !== "done") {
+    localStorage.setItem("ct_preferred_lang", "auto");
+    localStorage.setItem("ct_v94_lang_reset", "done");
+  }
 } catch {}
 
 // Live-benchmarked best models: gemini-3-flash-preview is #1 (2/2 OK, 0% 503, ~3.3s)
@@ -106,7 +111,25 @@ function hasValidApiKey() {
   return getApiKeys().length > 0;
 }
 
-if (hasValidApiKey() && sessionStorage.getItem("ct_auto_mode") === "true") {
+function getAiMode() {
+  return localStorage.getItem("ct_ai_mode") === "api" ? "api" : "web";
+}
+
+function isWebMode() {
+  return getAiMode() === "web";
+}
+
+function isAiReady() {
+  return isWebMode() || hasValidApiKey();
+}
+
+function getTypingSpeedSec() {
+  const raw = parseInt(localStorage.getItem("ct_typing_speed_sec") || "8", 10);
+  if (isNaN(raw)) return 8;
+  return Math.max(1, Math.min(60, raw));
+}
+
+if (isAiReady() && sessionStorage.getItem("ct_auto_mode") === "true") {
   autoMode = true;
 } else {
   autoMode = false;
@@ -122,6 +145,15 @@ function randMs(min, max) {
 }
 
 // ---------------- Bridge Communication (MAIN world + all iframes) ----------------
+// Live progress updates from background.js while Gemini Web tab is generating
+try {
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg && msg.type === "GEMINI_WEB_PROGRESS" && msg.text) {
+      setOutput(msg.text);
+    }
+  });
+} catch {}
+
 window.addEventListener("message", (event) => {
   if (!event.data || event.data.source !== "CT_BRIDGE") return;
   const { id, type, payload, pct } = event.data;
@@ -228,6 +260,38 @@ function createPanel() {
         color: #bbf7d0 !important;
         font-weight: 600;
       }
+      .ct-mode-active {
+        background: rgba(20, 83, 45, 0.80) !important;
+        border-color: rgba(134, 239, 172, 0.70) !important;
+        color: #bbf7d0 !important;
+        font-weight: 600;
+      }
+      .ct-speed-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 5px;
+        margin-top: 7px;
+      }
+      .ct-speed-chip {
+        background: rgba(10, 12, 18, 0.72);
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        color: #e5e7eb;
+        border-radius: 7px;
+        padding: 4px 3px;
+        font-size: 10.5px;
+        font-weight: 600;
+        cursor: pointer;
+        text-align: center;
+      }
+      .ct-speed-chip:hover {
+        border-color: rgba(255, 255, 255, 0.45);
+        color: #ffffff;
+      }
+      .ct-speed-chip-active {
+        background: rgba(20, 83, 45, 0.80) !important;
+        border-color: rgba(134, 239, 172, 0.70) !important;
+        color: #bbf7d0 !important;
+      }
     `;
     document.head.appendChild(styleTag);
   }
@@ -236,12 +300,12 @@ function createPanel() {
   panel.id = "ct-helper-panel";
   panel.style.cssText = `
     position: fixed; bottom: 20px; right: 20px; z-index: 999999;
-    background: rgba(16, 18, 26, 0.62);
-    backdrop-filter: blur(10px) saturate(150%);
-    -webkit-backdrop-filter: blur(10px) saturate(150%);
+    background: rgba(16, 18, 26, 0.64);
+    backdrop-filter: blur(12px) saturate(150%);
+    -webkit-backdrop-filter: blur(12px) saturate(150%);
     color: #ffffff;
     border: 1px solid rgba(255, 255, 255, 0.24);
-    border-radius: 16px; padding: 13px; width: 355px;
+    border-radius: 16px; padding: 13px; width: 345px;
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.28);
     font-size: 12.5px;
@@ -249,14 +313,40 @@ function createPanel() {
 
   panel.innerHTML = `
     <div style="font-weight: 600; margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center; gap:6px;">
-      <span style="display:flex; align-items:center; gap:4px; flex-wrap:nowrap;">
-        <span style="color:#ffffff; white-space:nowrap;">CodeTantra</span>
-        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 5px; border-radius:6px;">v8.6</span>
-        <button id="ct-set-key" class="ct-icon-btn ct-key-missing" title="Set CodeTantra-only Gemini API Key">Set Key</button>
-        <button id="ct-scan-top" class="ct-icon-btn" title="Jump to topmost incomplete pink question">Top</button>
-        <button id="ct-lang-btn" class="ct-icon-btn" title="Preferred language for multi-lang editors">Lang</button>
+      <span style="display:flex; align-items:center; gap:5px; flex-wrap:nowrap;">
+        <span style="color:#ffffff; white-space:nowrap; font-size:13px;">CodeTantra</span>
+        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v10.2</span>
+        <button id="ct-mode-btn" class="ct-icon-btn ct-mode-active" title="Active AI Mode (click to toggle Web / API)">Web</button>
       </span>
-      <span id="ct-status" style="color:#e5e7eb; font-size:11px; font-weight:500; max-width:112px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">Idle</span>
+      <span style="display:flex; align-items:center; gap:6px;">
+        <span id="ct-status" style="color:#e5e7eb; font-size:11px; font-weight:500; max-width:110px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">Idle</span>
+        <button id="ct-settings-btn" class="ct-icon-btn" title="Settings: Mode, API Key & Typing Speed" style="padding:2px 6px; font-size:11px;">⚙</button>
+      </span>
+    </div>
+    <div id="ct-settings-drawer" style="display:none; margin-bottom:10px; padding:9px 10px; border-radius:11px; background:rgba(10,12,18,0.78); border:1px solid rgba(255,255,255,0.16);">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; margin-bottom:9px; padding-bottom:8px; border-bottom:1px solid rgba(255,255,255,0.10);">
+        <span style="display:flex; gap:5px;">
+          <button id="ct-pick-web" class="ct-icon-btn" style="padding:3px 8px;">Web</button>
+          <button id="ct-pick-api" class="ct-icon-btn" style="padding:3px 8px;">API</button>
+        </span>
+        <button id="ct-set-key" class="ct-icon-btn ct-key-missing" style="padding:3px 8px;" title="Set CodeTantra-only Gemini API Key">Set Key</button>
+      </div>
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; font-size:11px; color:#e5e7eb;">
+        <span>Typing Speed: <b id="ct-speed-val" style="color:#86efac;">8s</b></span>
+        <span style="display:flex; align-items:center; gap:4px;">
+          <button id="ct-speed-minus" class="ct-icon-btn" style="padding:1px 7px; font-weight:700;">−</button>
+          <button id="ct-speed-plus" class="ct-icon-btn" style="padding:1px 7px; font-weight:700;">+</button>
+        </span>
+      </div>
+      <input id="ct-speed-slider" type="range" min="1" max="60" value="8" style="width:100%; margin-top:6px; accent-color:#86efac; cursor:pointer;" />
+      <div class="ct-speed-grid">
+        <button class="ct-speed-chip" data-sec="2">2s Turbo</button>
+        <button class="ct-speed-chip" data-sec="5">5s Fast</button>
+        <button class="ct-speed-chip" data-sec="10">10s Normal</button>
+        <button class="ct-speed-chip" data-sec="20">20s Med</button>
+        <button class="ct-speed-chip" data-sec="35">35s Slow</button>
+        <button class="ct-speed-chip" data-sec="60">60s Human</button>
+      </div>
     </div>
     <div style="display:flex; gap:8px; margin-bottom:2px;">
       <button id="ct-toggle-auto" class="ct-glass-btn">
@@ -277,7 +367,7 @@ function createPanel() {
       setStatus("Stopping...", "#facc15");
       return;
     }
-    if (!hasValidApiKey()) {
+    if (!isAiReady()) {
       showApiKeyRequired();
       return;
     }
@@ -285,30 +375,73 @@ function createPanel() {
     failedUrls.delete(window.location.href);
     solveCurrentSlide({ autoSubmitAndNext: false });
   });
-  const langBtn = document.getElementById("ct-lang-btn");
-  const langCycle = ["auto", "java", "python", "cpp", "c"];
-  function syncLangBtn() {
-    const cur = localStorage.getItem("ct_preferred_lang") || "auto";
-    if (langBtn) langBtn.innerText = cur === "auto" ? "Lang" : cur.toUpperCase();
+
+  // Clean Single Active Mode Pill (GREEN for whichever mode is active!) + Settings Drawer
+  const modeBtn = document.getElementById("ct-mode-btn");
+  const pickWebBtn = document.getElementById("ct-pick-web");
+  const pickApiBtn = document.getElementById("ct-pick-api");
+  const settingsBtn = document.getElementById("ct-settings-btn");
+  const settingsDrawer = document.getElementById("ct-settings-drawer");
+
+  function setAiMode(mode) {
+    localStorage.setItem("ct_ai_mode", mode === "api" ? "api" : "web");
+    apiCooldownUntil = 0;
+    syncModeBtn();
+    setStatus(mode === "web" ? "Web Active ✓" : "API Active ✓", "#86efac");
+    setOutput(
+      mode === "web"
+        ? "Web Mode ON (Green) — Free gemini.google.com tab use karega (0 API Key)."
+        : "API Mode ON (Green) — CodeTantra-only API key use karega."
+    );
   }
-  syncLangBtn();
-  langBtn.addEventListener("click", () => {
-    const cur = localStorage.getItem("ct_preferred_lang") || "auto";
-    const next = langCycle[(langCycle.indexOf(cur) + 1) % langCycle.length];
-    localStorage.setItem("ct_preferred_lang", next);
-    syncLangBtn();
-    setStatus(`Lang: ${next.toUpperCase()}`, "#86efac");
-  });
-  document.getElementById("ct-scan-top").addEventListener("click", async () => {
-    if (isBusy) return;
-    setStatus("Scanning top...", "#60a5fa");
-    const res = await callBridge("OPEN_NEXT_SIDEBAR_ITEM", {}, 8000);
-    if (res && res.ok) {
-      setStatus("Opened top ✓", "#86efac");
-      setOutput(`Sabse upar ka incomplete question khola:\n${res.title}`);
-    } else {
-      setStatus("None found", "#facc15");
+
+  function syncModeBtn() {
+    const webOn = isWebMode();
+    if (modeBtn) {
+      modeBtn.innerText = webOn ? "Web" : "API";
+      modeBtn.classList.remove("ct-mode-active", "ct-key-missing");
+      if (webOn || hasValidApiKey()) {
+        modeBtn.classList.add("ct-mode-active");
+      } else {
+        modeBtn.classList.add("ct-key-missing");
+      }
+      modeBtn.title = webOn ? "Active: Web Mode (Green). Click to switch to API." : "Active: API Mode (Green). Click to switch to Web.";
     }
+    if (pickWebBtn) pickWebBtn.classList.toggle("ct-mode-active", webOn);
+    if (pickApiBtn) pickApiBtn.classList.toggle("ct-mode-active", !webOn);
+    syncAutoUI();
+  }
+  syncModeBtn();
+  modeBtn.addEventListener("click", () => setAiMode(isWebMode() ? "api" : "web"));
+  pickWebBtn.addEventListener("click", () => setAiMode("web"));
+  pickApiBtn.addEventListener("click", () => setAiMode("api"));
+  settingsBtn.addEventListener("click", () => {
+    if (!settingsDrawer) return;
+    settingsDrawer.style.display = settingsDrawer.style.display === "none" ? "block" : "none";
+  });
+
+  // Typing Speed Grid inside Settings Drawer (1s - 60s)
+  const speedVal = document.getElementById("ct-speed-val");
+  const speedSlider = document.getElementById("ct-speed-slider");
+  const speedChips = Array.from(panel.querySelectorAll(".ct-speed-chip"));
+  function applyTypingSpeed(sec) {
+    const clamped = Math.max(1, Math.min(60, parseInt(sec, 10) || 8));
+    localStorage.setItem("ct_typing_speed_sec", String(clamped));
+    if (speedVal) speedVal.innerText = `${clamped}s`;
+    if (speedSlider) speedSlider.value = String(clamped);
+    speedChips.forEach((chip) => {
+      chip.classList.toggle("ct-speed-chip-active", parseInt(chip.dataset.sec, 10) === clamped);
+    });
+  }
+  applyTypingSpeed(getTypingSpeedSec());
+  speedSlider.addEventListener("input", () => applyTypingSpeed(speedSlider.value));
+  document.getElementById("ct-speed-minus").addEventListener("click", () => applyTypingSpeed(getTypingSpeedSec() - 2));
+  document.getElementById("ct-speed-plus").addEventListener("click", () => applyTypingSpeed(getTypingSpeedSec() + 2));
+  speedChips.forEach((chip) => {
+    chip.addEventListener("click", () => {
+      applyTypingSpeed(chip.dataset.sec);
+      setStatus(`Speed: ${chip.dataset.sec}s`, "#86efac");
+    });
   });
   document.getElementById("ct-set-key").addEventListener("click", async () => {
     const curRaw = localStorage.getItem(CT_API_KEY_STORAGE) || "";
@@ -436,14 +569,14 @@ function clearOutput() {
 function syncAutoUI() {
   const btn = document.getElementById("ct-toggle-auto");
   if (!btn) return;
-  if (autoMode && hasValidApiKey()) {
+  if (autoMode && isAiReady()) {
     btn.innerText = "Stop Auto";
     btn.classList.add("ct-glass-btn-running");
     setStatus("Running...", "#86efac");
   } else {
     btn.innerText = "Start Auto";
     btn.classList.remove("ct-glass-btn-running");
-    if (!hasValidApiKey()) {
+    if (!isAiReady()) {
       setStatus("API Key Required", "#f87171");
     } else {
       setStatus("Stopped", "#d1d5db");
@@ -452,7 +585,7 @@ function syncAutoUI() {
 }
 
 function setAutoMode(enabled) {
-  if (enabled && !hasValidApiKey()) {
+  if (enabled && !isAiReady()) {
     autoMode = false;
     sessionStorage.setItem("ct_auto_mode", "false");
     if (autoInterval) {
@@ -479,7 +612,7 @@ function setAutoMode(enabled) {
   }
 
   apiCooldownUntil = 0;
-  autoInterval = setInterval(runAutoTick, 2000);
+  autoInterval = setInterval(runAutoTick, 1000);
   runAutoTick();
 }
 
@@ -520,7 +653,7 @@ async function discoverAvailableModels(apiKey) {
       const extras = [...availableSet].filter(
         (name) =>
           !prioritized.includes(name) &&
-          (name.startsWith("gemini-") || name.startsWith("gemma-4-")) &&
+          name.startsWith("gemini-") &&
           !/(image|tts|live|audio|embed|robotics|transcribe|imagen|veo|lyria|customtools|computer|1\.0|1\.5|2\.0|2\.5|3\.6|3\.7|3\.8|pro|omni|nano|antigravity|deep-research|gemini-4-)/i.test(
             name
           )
@@ -560,11 +693,39 @@ function extractJsonFromText(raw) {
 }
 
 async function callGemini(prompt) {
+  // ZERO-API-KEY MODE: Route directly through logged-in gemini.google.com background tab!
+  if (isWebMode()) {
+    setStatus("AI: Gemini Web...", "#93c5fd");
+    setOutput("Free Gemini Web (gemini.google.com) se answer laa raha hoon (0 API Key)...");
+    try {
+      const res = await new Promise((resolve) => {
+        let done = false;
+        const finish = (v) => { if (!done) { done = true; clearTimeout(t); resolve(v); } };
+        const t = setTimeout(() => finish({ ok: false, error: "Gemini Web timeout (130s) — Gemini tab mein 'Neon' se 'Fast' par switch karo ya 'API' mode chalao." }), 130000);
+        chrome.runtime.sendMessage({ type: "GEMINI_WEB_ASK", prompt }, (reply) => {
+          if (chrome.runtime.lastError) {
+            finish({ ok: false, error: chrome.runtime.lastError.message });
+          } else {
+            finish(reply || { ok: false, error: "Gemini Web background worker se reply nahi mila." });
+          }
+        });
+      });
+      if (res && res.ok && res.rawText) {
+        return { ok: true, model: res.model || "Gemini Web (Free)", rawText: extractJsonFromText(res.rawText) };
+      }
+      apiCooldownUntil = Date.now() + 20000;
+      return { ok: false, error: res?.error || "Gemini Web se reply nahi mila. Check karo gemini.google.com tab logged in hai." };
+    } catch (err) {
+      apiCooldownUntil = Date.now() + 20000;
+      return { ok: false, error: `Gemini Web error: ${err.message}` };
+    }
+  }
+
   const apiKeys = getApiKeys();
   if (!apiKeys.length) {
     return {
       ok: false,
-      error: "Koi valid Gemini API Key set nahi hai! Upar 'Key' button dabakar apni AIza... key paste karo."
+      error: "Koi valid Gemini API Key set nahi hai! Upar 'Web' dabakar free mode chalao ya 'Key' mein CodeTantra API key daalo."
     };
   }
 
@@ -863,8 +1024,16 @@ Strict Rules:
     }
 
     if (!edits.length) {
-      setStatus("Empty code", "#facc15");
-      setOutput("Gemini ne koi valid code edit return nahi kiya.");
+      if (attempt < MAX_FIX_ATTEMPTS) {
+        previousError =
+          (previousError ? previousError + "\n" : "") +
+          "CRITICAL: You returned empty edits []. Tests FAILED or code has a bug — you MUST return non-empty replace_lines edits to fix the code!";
+        setStatus(`Empty retry (${attempt})...`, "#facc15");
+        continue;
+      }
+      failedUrls.add(window.location.href);
+      setStatus("Paused (no edit)", "#facc15");
+      setOutput("Gemini ne 3 tries mein bhi empty edits [] diya (infinite loop rok diya hai). Ek baar test case check karo ya 'Solve & Type' dabao.");
       return;
     }
 
@@ -1023,8 +1192,12 @@ Task:
       }));
     }
 
-    // Turbo typing pace (~5.5-7.5s on 1st attempt, ~1.5-3s on surgical compiler/test fix)
-    const targetTotalMs = attempt === 1 ? randMs(5500, 7500) : randMs(1500, 3000);
+    // User-controlled Typing Speed from Speed Grid (1s-60s); surgical retry stays quick (~35%)
+    const speedBaseMs = getTypingSpeedSec() * 1000;
+    const targetTotalMs =
+      attempt === 1
+        ? randMs(Math.max(800, Math.round(speedBaseMs * 0.9)), Math.round(speedBaseMs * 1.1))
+        : Math.max(1200, Math.round(speedBaseMs * 0.35));
     const blockSummary = edits
       .map((e) => (e.start_line >= 1 && e.mode !== "replace_all" ? `L${e.start_line}-L${e.end_line || e.start_line}` : "Full"))
       .join(", ");
@@ -1283,7 +1456,7 @@ Return ONLY valid JSON:
 
 // ---------------- Unified Slide Dispatcher ----------------
 async function solveCurrentSlide({ autoSubmitAndNext = false } = {}) {
-  if (!hasValidApiKey()) {
+  if (!isAiReady()) {
     if (autoMode) setAutoMode(false);
     showApiKeyRequired();
     return;
@@ -1322,7 +1495,7 @@ async function solveCurrentSlide({ autoSubmitAndNext = false } = {}) {
 
 async function runAutoTick() {
   if (!autoMode || isBusy || tickInFlight) return;
-  if (!hasValidApiKey()) {
+  if (!isAiReady()) {
     setAutoMode(false);
     showApiKeyRequired();
     return;
@@ -1345,7 +1518,7 @@ async function runAutoTick() {
     }
 
     // Give iframes, CodeMirror 6, and Pyodide time to mount cleanly
-    if (Date.now() - slideEnteredAt < 1800) {
+    if (Date.now() - slideEnteredAt < 700) {
       setStatus("Loading slide...", "#9ca3af");
       return;
     }
@@ -1356,8 +1529,8 @@ async function runAutoTick() {
       return;
     }
 
-    // NEVER blindly skip a coding/quiz page via solvedUrls — always verify actual test-case pass status!
-    const edState = await callBridge("READ_EDITOR", {}, 3500);
+    // Lightweight editor check (light: true -> NEVER scrolls editor up/down during idle/retry ticks!)
+    const edState = await callBridge("READ_EDITOR", { light: true }, 3500);
     if (edState && edState.found) {
       // Check ONLY this active coding problem's own sidebar-stripped statement (NEVER sidebar/panel!)
       const activeProblemHead = (edState.problemText || "").slice(0, 500);
@@ -1443,7 +1616,7 @@ async function runAutoTick() {
 setTimeout(() => {
   createPanel();
   syncKeyBtn();
-  if (!hasValidApiKey()) {
+  if (!isAiReady()) {
     autoMode = false;
     sessionStorage.setItem("ct_auto_mode", "false");
     syncAutoUI();

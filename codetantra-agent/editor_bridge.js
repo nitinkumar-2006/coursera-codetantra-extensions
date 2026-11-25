@@ -250,10 +250,21 @@
     const clone = doc.body.cloneNode(true);
     clone
       .querySelectorAll(
-        '#ct-helper-panel, aside, nav, header, .navbar, [class*="sidebar" i], [class*="drawer" i], [class*="toc" i], .cm-editor, .ace_editor, .monaco-editor, .CodeMirror, script, style, [aria-hidden="true"], .hidden, .d-none, [style*="display: none"], [style*="display:none"]'
+        '#ct-helper-panel, aside, nav, header, .navbar, [class*="sidebar" i], [class*="drawer" i], [class*="toc" i], [class*="menu" i], [class*="course-content" i], .cm-editor, .ace_editor, .monaco-editor, .CodeMirror, script, style, [aria-hidden="true"], .hidden, .d-none, [style*="display: none"], [style*="display:none"]'
       )
       .forEach((el) => el.remove());
-    return (clone.innerText || "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 15000);
+    // Strip any hidden CodeTantra TOC / search-modal container that wasn't caught by class names
+    Array.from(clone.querySelectorAll("div, ul, section")).forEach((el) => {
+      const t = (el.innerText || "").trim();
+      if (
+        t.length > 120 &&
+        (/search content|minimum 3 characters required for search|1\.1\.1\.\s*what is data structure|36\.1\.1\.\s*rat in a maze/i.test(t) ||
+          (t.match(/\b\d+\.\d+\.\d+\./g) || []).length >= 5)
+      ) {
+        el.remove();
+      }
+    });
+    return (clone.innerText || "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 9000);
   }
 
   // Auto-switch editor language dropdown (e.g. C -> Java / Python / C++) when user sets preferred language
@@ -650,44 +661,81 @@
     return false;
   }
 
-  // Auto-expand collapsed failed 'Test case 1' / 'Test case 2' accordions on the right-side test panel
+  // Auto-expand EVERY collapsed FAILED 'Test case N' accordion on the right-side test panel (even if Test case 1 passed & is already open!)
   async function expandFailedTestCasesInDoc(doc) {
     if (!doc || !doc.body) return;
     try {
       const win = doc.defaultView || window;
       const minRightX = Math.floor((win.innerWidth || 1200) * 0.35);
-      const hasVisibleDiff = Array.from(doc.querySelectorAll("th, div, span, p")).some((el) => {
-        if (el.closest("#ct-helper-panel") || !isVisible(el)) return false;
-        const r = el.getBoundingClientRect();
-        if (r.left < minRightX) return false;
-        const t = normalizeText(el.innerText || el.textContent || "");
-        return t === "expected output" || t === "actual output";
-      });
-      if (hasVisibleDiff) return;
+
+      function getIconColorFlags(container) {
+        let hasRed = false;
+        let hasGreen = false;
+        const icons = Array.from(container.querySelectorAll("svg, path, circle, i, span"));
+        for (const ic of icons) {
+          const st = win.getComputedStyle(ic);
+          for (const prop of [st.color, st.fill, st.stroke, st.backgroundColor]) {
+            const m = (prop || "").match(/rgba?\(\s*(\d+),\s*(\d+),\s*(\d+)/);
+            if (!m) continue;
+            const r = parseInt(m[1], 10);
+            const g = parseInt(m[2], 10);
+            const b = parseInt(m[3], 10);
+            if (r >= 150 && r > g + 35 && r > b + 35) hasRed = true;
+            if (g >= 115 && g > r + 25) hasGreen = true;
+          }
+        }
+        return { hasRed, hasGreen };
+      }
 
       const rawHeaders = Array.from(doc.querySelectorAll("button, [role='button'], div, span, h3, h4, h5")).filter((el) => {
-        if (el.closest("#ct-helper-panel, .cm-editor, .ace_editor") || !isVisible(el)) return false;
+        if (el.closest('#ct-helper-panel, .cm-editor, .ace_editor, aside, nav, header, [class*="sidebar" i], [class*="drawer" i], [class*="toc" i]')) {
+          return false;
+        }
+        if (!isVisible(el)) return false;
         const r = el.getBoundingClientRect();
-        if (r.left < minRightX || r.height > 70 || r.width < 60) return false;
+        if (r.left < minRightX || r.height > 75 || r.width < 55) return false;
         const t = normalizeText(el.innerText || el.textContent || "");
         return /^test case\s*\d+\b/i.test(t) && t.length < 40;
       });
       const headers = rawHeaders.filter((el) => !rawHeaders.some((other) => other !== el && el.contains(other)));
-      for (const hdr of headers.slice(0, 2)) {
-        const clickable = hdr.closest("button, [role='button']") || hdr.parentElement || hdr;
-        dispatchReliableClick(clickable);
-        await sleep(320);
-        const openedNow = Array.from(doc.querySelectorAll("th, div, span, p")).some((el) => {
-          if (el.closest("#ct-helper-panel") || !isVisible(el)) return false;
-          const r = el.getBoundingClientRect();
-          return r.left >= minRightX && normalizeText(el.innerText || "") === "expected output";
-        });
-        if (openedNow) break;
+
+      for (const hdr of headers) {
+        // Walk up to this single Test Case's own accordion card (stop before enclosing multiple Test Cases)
+        let card = hdr.parentElement || hdr;
+        for (let up = 0; up < 4 && card && card.parentElement && card.parentElement !== doc.body; up++) {
+          const parentTxt = card.parentElement.innerText || "";
+          const tcMatches = parentTxt.match(/test case\s*\d+/gi) || [];
+          if (tcMatches.length <= 1) {
+            card = card.parentElement;
+          } else {
+            break;
+          }
+        }
+
+        const headerRow = hdr.closest("button, [role='button']") || hdr.parentElement || hdr;
+        const { hasRed, hasGreen } = getIconColorFlags(headerRow);
+        // Skip clearly passed (green-only) test cases!
+        if (hasGreen && !hasRed) continue;
+
+        const cardTxt = normalizeText(card.innerText || "");
+        const alreadyOpen =
+          (cardTxt.includes("expected output") && cardTxt.includes("actual output")) ||
+          cardTxt.includes("error:") ||
+          cardTxt.includes("exception") ||
+          cardTxt.includes("traceback");
+        if (alreadyOpen && card.getBoundingClientRect().height > 95) continue;
+
+        // Scroll this collapsed failed Test case into view and click it to expand!
+        hdr.scrollIntoView({ behavior: "instant", block: "center" });
+        await sleep(120);
+        dispatchReliableClick(headerRow);
+        if (headerRow !== hdr) dispatchReliableClick(hdr);
+        await sleep(420);
       }
     } catch {}
   }
 
-  // Parse CodeTantra's side-by-side 'Expected output' vs 'Actual output' diff and return ONLY mismatched rows!
+  // Parse CodeTantra's side-by-side 'Expected output' vs 'Actual output' diff (including scrolled-off rows & red-highlighted diffs!)
   function extractExpectedVsActualDiffs(doc) {
     if (!doc || !doc.body) return "";
     const win = doc.defaultView || window;
@@ -709,11 +757,10 @@
         const { exp, act } = rows[i];
         if (exp === act) continue;
         diffCount++;
-        if (diffCount > 16) {
+        if (diffCount > 18) {
           diffLines.push(`... (+more mismatched rows omitted)`);
           break;
         }
-        // Include 1 preceding matching row for context so Gemini knows exact menu/step location
         if (i > 0 && lastEmittedIdx < i - 1) {
           diffLines.push(`Context Row ${i}: ${rows[i - 1].exp}`);
         }
@@ -722,17 +769,17 @@
       }
     };
 
-    // Strategy 1: Standard <table> containing Expected output / Actual output
+    // Strategy 1: Standard <table> containing Expected output / Actual output (read ALL rows, even scrolled-off!)
     try {
       const tables = Array.from(doc.querySelectorAll("table")).filter((tb) => {
-        if (tb.closest("#ct-helper-panel") || !isVisible(tb)) return false;
+        if (tb.closest('#ct-helper-panel, aside, nav, [class*="sidebar" i]') || !isVisible(tb)) return false;
         const r = tb.getBoundingClientRect();
         if (r.left < minRightX) return false;
         const txt = normalizeText(tb.innerText || "");
         return txt.includes("expected output") && txt.includes("actual output");
       });
       for (const tb of tables) {
-        const trs = Array.from(tb.querySelectorAll("tr")).filter((tr) => isVisible(tr));
+        const trs = Array.from(tb.querySelectorAll("tr"));
         const parsed = [];
         for (const tr of trs) {
           const cells = Array.from(tr.querySelectorAll("td, th"));
@@ -750,11 +797,11 @@
       }
     } catch {}
 
-    // Strategy 2: Flex/Grid 2-column div layout under 'Expected output' | 'Actual output'
+    // Strategy 2: Flex/Grid 2-column div layout under 'Expected output' | 'Actual output' (handles scrolled-off & multi-child rows!)
     if (!diffLines.length) {
       try {
         const expHeaders = Array.from(doc.querySelectorAll("div, span, th, p")).filter((el) => {
-          if (el.closest("#ct-helper-panel") || !isVisible(el)) return false;
+          if (el.closest('#ct-helper-panel, aside, nav, [class*="sidebar" i]') || !isVisible(el)) return false;
           const r = el.getBoundingClientRect();
           return r.left >= minRightX && normalizeText(el.innerText || "") === "expected output";
         });
@@ -762,20 +809,22 @@
           const expX = expHdr.getBoundingClientRect().left;
           let box = expHdr.parentElement;
           let foundBox = null;
-          for (let up = 0; up < 5 && box && box !== doc.body; up++) {
+          for (let up = 0; up < 6 && box && box !== doc.body; up++) {
             const txt = normalizeText(box.innerText || "");
-            if (txt.includes("expected output") && txt.includes("actual output") && box.children.length >= 2) {
+            if (txt.includes("expected output") && txt.includes("actual output")) {
               foundBox = box;
-              if (box.querySelectorAll("div").length >= 6) break;
+              if ((box.innerText || "").length > 120) break;
             }
             box = box.parentElement;
           }
           if (!foundBox) continue;
+
+          // 2a: Direct 2-column flex/grid rows
           const rowEls = Array.from(foundBox.querySelectorAll("div, li")).filter((el) => {
-            if (!isVisible(el) || el.children.length !== 2) return false;
+            if (el.children.length !== 2) return false;
             const r0 = el.children[0].getBoundingClientRect();
             const r1 = el.children[1].getBoundingClientRect();
-            return Math.abs(r0.top - r1.top) < 18 && r1.left > r0.left + 80 && Math.abs(r0.left - expX) < 60;
+            return r0.width > 40 && r1.width > 40 && Math.abs(r0.top - r1.top) < 22 && r1.left > r0.left + 60 && Math.abs(r0.left - expX) < 80;
           });
           const parsed = [];
           for (const row of rowEls) {
@@ -785,12 +834,83 @@
             if (!exp && !act) continue;
             parsed.push({ exp, act });
           }
-          if (parsed.length) pushDiffRows(parsed);
+          if (parsed.length) {
+            pushDiffRows(parsed);
+            continue;
+          }
+
+          // 2b: Tab-separated lines in foundBox.innerText (works even when CodeTantra uses CSS grid / nested wrappers!)
+          const tabLines = (foundBox.innerText || "").split("\n");
+          const tabParsed = [];
+          for (const rawLine of tabLines) {
+            if (!rawLine.includes("\t")) continue;
+            const parts = rawLine.split("\t").map(cleanCell);
+            if (parts.length < 2) continue;
+            if (normalizeText(parts[0]) === "expected output" || normalizeText(parts[1]) === "actual output") continue;
+            tabParsed.push({ exp: parts[0], act: parts[1] });
+          }
+          if (tabParsed.length) {
+            pushDiffRows(tabParsed);
+            continue;
+          }
+
+          // 2c: Fallback — extract red-highlighted mismatch elements inside foundBox (CodeTantra colors wrong output red/pink!)
+          const redRows = [];
+          for (const el of Array.from(foundBox.querySelectorAll("div, span, td, p, pre"))) {
+            const t = cleanCell(el.innerText || "");
+            if (!t || t.length > 260) continue;
+            const st = win.getComputedStyle(el);
+            const isRed = [st.color, st.backgroundColor].some((c) => {
+              const m = (c || "").match(/rgba?\(\s*(\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?/);
+              if (!m) return false;
+              const a = m[4] !== undefined ? parseFloat(m[4]) : 1;
+              if (a < 0.08) return false;
+              const r = parseInt(m[1], 10);
+              const g = parseInt(m[2], 10);
+              const b = parseInt(m[3], 10);
+              return r >= 150 && r > g + 35 && r > b + 35;
+            });
+            if (isRed && !redRows.includes(t)) redRows.push(t);
+          }
+          if (redRows.length) {
+            diffLines.push(`HIGHLIGHTED MISMATCH LINES:\n${redRows.slice(0, 24).join("\n")}`);
+          } else {
+            // Last resort: send the BOTTOM 2200 chars of the diff box (where output mismatches appear!)
+            const tail = cleanCell(foundBox.innerText || "").slice(-2200);
+            if (tail.length > 30) diffLines.push(`TEST CASE OUTPUT (BOTTOM):\n${tail}`);
+          }
         }
       } catch {}
     }
 
     return diffLines.length ? `EXACT EXPECTED vs ACTUAL MISMATCHES:\n${diffLines.join("\n")}` : "";
+  }
+
+  // Extract dedicated 'Compilation Error' panel text (e.g. "error in Hashing.java, line no: 16 ... constructor node in class node cannot be applied to given types;")
+  function extractCompilationErrorBlock(doc) {
+    if (!doc || !doc.body) return "";
+    const win = doc.defaultView || window;
+    const minRightX = Math.floor((win.innerWidth || 1200) * 0.35);
+    try {
+      const headings = Array.from(doc.querySelectorAll("div, span, h1, h2, h3, h4, h5, p")).filter((el) => {
+        if (el.closest('#ct-helper-panel, .cm-editor, .ace_editor, aside, nav, [class*="sidebar" i]') || !isVisible(el)) return false;
+        const r = el.getBoundingClientRect();
+        if (r.left < minRightX) return false;
+        const t = normalizeText(el.innerText || el.textContent || "");
+        return t === "compilation error" || t === "runtime error" || t === "compile error";
+      });
+      for (const h of headings) {
+        let box = h.parentElement;
+        for (let up = 0; up < 4 && box && box !== doc.body; up++) {
+          const t = (box.innerText || "").trim();
+          if (t.length > 35 && t.length < 2500) {
+            return `COMPILATION / RUNTIME ERROR:\n${t}`;
+          }
+          box = box.parentElement;
+        }
+      }
+    } catch {}
+    return "";
   }
 
   // Exact CodeTantra Test-Case Pass / Fail Evaluation Parser!
@@ -829,14 +949,20 @@
     const errText = readFailureSnippetFromDoc(doc);
     const normErr = normalizeText(errText);
     if (
+      normErr.includes("compilation error") ||
+      normErr.includes("compile error") ||
+      normErr.includes("runtime error") ||
+      normErr.includes("error in ") ||
+      normErr.includes("cannot be applied to") ||
+      normErr.includes("cannot find symbol") ||
+      normErr.includes("incompatible types") ||
       normErr.includes("traceback") ||
       normErr.includes("syntaxerror") ||
       normErr.includes("indentationerror") ||
       normErr.includes("nameerror") ||
       normErr.includes("typeerror") ||
-      normErr.includes("compilation error") ||
-      normErr.includes("runtime error") ||
-      normErr.includes("test case failed")
+      normErr.includes("test case failed") ||
+      normErr.includes("output mismatch")
     ) {
       return { status: "failed", summary: errText };
     }
@@ -851,6 +977,16 @@
     const unique = [];
     const seen = new Set();
 
+    const isTocNoise = (s) =>
+      /search content|cmd\+k|minimum 3 characters|what is data structure|introduction to data structures/i.test(s || "");
+
+    // PRIORITY 0: Dedicated Compilation / Runtime Error panel (e.g. "error in Hashing.java, line no: 16 ...")
+    const compileBlock = extractCompilationErrorBlock(doc);
+    if (compileBlock) {
+      seen.add(compileBlock);
+      unique.push(compileBlock);
+    }
+
     // PRIORITY 1: Exact mismatched Expected vs Actual diff rows at the VERY TOP (never truncated by identical prompt rows!)
     const smartDiff = extractExpectedVsActualDiffs(doc);
     if (smartDiff) {
@@ -858,38 +994,46 @@
       unique.push(smartDiff);
     }
 
-    // PRIORITY 2: Explicit compiler / runtime error lines from visible page text
+    // PRIORITY 2: Explicit compiler / runtime error lines from visible right-side / main page text (excluding sidebar/TOC!)
     try {
       const clone = doc.body.cloneNode(true);
-      clone.querySelectorAll("#ct-helper-panel, .cm-editor, .ace_editor, script, style").forEach((el) => el.remove());
+      clone
+        .querySelectorAll('#ct-helper-panel, .cm-editor, .ace_editor, aside, nav, header, .navbar, [class*="sidebar" i], [class*="drawer" i], [class*="toc" i], script, style')
+        .forEach((el) => el.remove());
       const lines = (clone.innerText || "").split("\n").map((l) => l.trim()).filter(Boolean);
-      const errLines = lines.filter((l) =>
-        /(error:|caused by:|exception|wrong name:|traceback|syntaxerror|indentationerror|cannot find symbol|incompatible types|output mismatch|out of \d+ .*test case)/i.test(l)
+      const errLines = lines.filter(
+        (l) =>
+          !isTocNoise(l) &&
+          /(compilation error|error in .*line no:|error:|caused by:|exception|wrong name:|cannot be applied to|cannot find symbol|incompatible types|expected|traceback|syntaxerror|indentationerror|output mismatch|out of \d+ .*test case)/i.test(l)
       );
       for (const eline of errLines) {
         if (!seen.has(eline)) {
           seen.add(eline);
-          unique.unshift(eline);
+          unique.push(eline);
         }
       }
     } catch {}
 
-    // PRIORITY 3: Right-side test/output containers ONLY (never scrape left-side 'Sample Test Cases' accordion!)
-    const candidates = Array.from(
-      doc.querySelectorAll(
-        '[class*="output" i], [class*="result" i], [class*="console" i], [class*="error" i], [class*="test" i], [class*="traceback" i], [class*="text-red" i], [class*="danger" i], [class*="mono" i], [class*="alert" i], pre'
-      )
-    ).filter((el) => {
-      if (el.closest("#ct-helper-panel, .cm-editor, .ace_editor") || !isVisible(el)) return false;
-      const r = el.getBoundingClientRect();
-      return r.left >= minRightX;
-    });
+    // PRIORITY 3: Only scrape generic right-side output containers if neither compileBlock nor smartDiff was found
+    if (!compileBlock && !smartDiff) {
+      const candidates = Array.from(
+        doc.querySelectorAll(
+          '[class*="output" i], [class*="result" i], [class*="console" i], [class*="error" i], [class*="test" i], [class*="traceback" i], [class*="text-red" i], [class*="danger" i], [class*="mono" i], [class*="alert" i], pre'
+        )
+      ).filter((el) => {
+        if (el.closest('#ct-helper-panel, .cm-editor, .ace_editor, aside, nav, header, .navbar, [class*="sidebar" i], [class*="drawer" i], [class*="toc" i]') || !isVisible(el)) {
+          return false;
+        }
+        const r = el.getBoundingClientRect();
+        return r.left >= minRightX;
+      });
 
-    for (const el of candidates) {
-      const t = (el.innerText || "").trim();
-      if (t.length > 0 && t.length < 2200 && !/^sample test cases/i.test(t) && !seen.has(t)) {
-        seen.add(t);
-        unique.push(t);
+      for (const el of candidates) {
+        const t = (el.innerText || "").trim();
+        if (t.length > 0 && t.length < 2200 && !/^sample test cases/i.test(t) && !isTocNoise(t) && !seen.has(t)) {
+          seen.add(t);
+          unique.push(t);
+        }
       }
     }
 
@@ -1359,7 +1503,7 @@
     return Array.from(lockedSet).sort((a, b) => a - b);
   }
 
-  async function readEditorStateLocal() {
+  async function readEditorStateLocal({ light = false } = {}) {
     const ed = detectEditorRecursive(document, window);
     if (!ed) return { found: false, type: "none", code: "", language: "", lockedLines: [], problemText: "" };
 
@@ -1374,7 +1518,9 @@
         const lineEls = Array.from(ed.contentEl.querySelectorAll(".cm-line"));
         code = lineEls.map((l) => (l.textContent || "").replace(/\u200B/g, "")).join("\n");
       }
-      lockedLines = await scanAllLockedLinesCM6(ed);
+      if (!light) {
+        lockedLines = await scanAllLockedLinesCM6(ed);
+      }
     } else if (ed.type === "ace") {
       code = ed.editor.getValue() || "";
       const modeId = ed.editor.session.getMode?.()?.$id || "";
@@ -1388,7 +1534,9 @@
       language = (typeof mode === "string" ? mode : mode?.name) || language;
     }
 
-    await expandSampleTestCasesInDoc(ed.doc);
+    if (!light) {
+      await expandSampleTestCasesInDoc(ed.doc);
+    }
     const problemText = extractProblemTextFromDoc(ed.doc);
     return { found: true, type: ed.type, code, language, lockedLines, problemText };
   }
@@ -1446,10 +1594,19 @@
     }
 
     const totalChars = Math.max(1, sortedEdits.reduce((sum, e) => sum + (e.code || "").length, 0));
-    // Fast ~10s natural typing: dynamically scale chunk size so even 1,500-char DSA code finishes in ~9-11s!
-    const chunkSize = totalChars > 1000 ? 5 : totalChars > 500 ? 3 : totalChars > 220 ? 2 : 1;
+    // Accurate typing speed scaling across the full 1s-60s Speed Grid (from 2s Turbo to 60s Human!)
+    const chunkSize =
+      targetTotalMs <= 3500
+        ? Math.max(6, Math.ceil(totalChars / 110))
+        : totalChars > 1000
+        ? 5
+        : totalChars > 500
+        ? 3
+        : totalChars > 220
+        ? 2
+        : 1;
     const totalSteps = Math.max(1, Math.ceil(totalChars / chunkSize));
-    const baseStepMs = Math.max(5, Math.min(32, Math.floor((targetTotalMs * 0.85) / totalSteps)));
+    const baseStepMs = Math.max(4, Math.min(250, Math.floor((targetTotalMs * 0.85) / totalSteps)));
     const baseCharMs = baseStepMs;
     let doneChars = 0;
 
@@ -1728,12 +1885,12 @@
       }
 
       if (type === "READ_EDITOR") {
-        const local = await readEditorStateLocal();
+        const local = await readEditorStateLocal(payload || {});
         if (local.found) {
           window.postMessage({ source: "CT_BRIDGE", id, type: "READ_EDITOR_RES", payload: local }, "*");
           return;
         }
-        const remote = await askChildFrames(id, "READ_EDITOR", {}, 4000);
+        const remote = await askChildFrames(id, "READ_EDITOR", payload || {}, 4000);
         window.postMessage(
           {
             source: "CT_BRIDGE",
@@ -1929,7 +2086,7 @@
       }
 
       if (type === "READ_EDITOR") {
-        const local = await readEditorStateLocal();
+        const local = await readEditorStateLocal(payload || {});
         if (local.found) window.top.postMessage({ source: "CT_FRAME_TO_TOP", id, type, payload: local }, "*");
         else broadcastToChildFrames(data);
         return;

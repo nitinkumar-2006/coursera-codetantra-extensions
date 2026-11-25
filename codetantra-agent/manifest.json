@@ -1,13 +1,17 @@
 {
   "manifest_version": 3,
   "name": "CodeTantra AI Agent",
-  "version": "8.6",
-  "description": "Full A-to-Z CodeTantra automation (Python, Java, C++): CodeMirror 6 iframe human-typing with strict indentation, 100% test-case pass detection, Objective/MCQ auto-solver, video/theory slide auto-next",
-  "permissions": ["activeTab"],
+  "version": "10.2",
+  "description": "CodeTantra AI Agent v10.0 Final: Zero-API-Key Gemini Web + API Key toggle, clean Settings drawer with 1s-60s Typing Speed Grid, surgical compiler/test-case diff fixes, and MCQ auto-solver",
+  "permissions": ["activeTab", "tabs", "scripting"],
   "host_permissions": [
     "https://*.codetantra.com/*",
-    "https://generativelanguage.googleapis.com/*"
+    "https://generativelanguage.googleapis.com/*",
+    "https://gemini.google.com/*"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": ["https://*.codetantra.com/*"],
