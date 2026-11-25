@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "CodeTantra AI Agent",
-  "version": "10.10",
-  "description": "CodeTantra AI Agent v10.0 Final: Zero-API-Key Gemini Web + API Key toggle, clean Settings drawer with 1s-60s Typing Speed Grid, surgical compiler/test-case diff fixes, and MCQ auto-solver",
+  "version": "11.1",
+  "description": "CodeTantra AI Agent v11.0: Python indentation & __init__ preservation, Gemini Web + ChatGPT fallback + API toggle, auto-Java/Lang selector, auto-Cancel popups, surgical compiler/test-case diff fixes",
   "permissions": ["activeTab", "tabs", "scripting"],
   "host_permissions": [
     "https://*.codetantra.com/*",
     "https://generativelanguage.googleapis.com/*",
-    "https://gemini.google.com/*"
+    "https://gemini.google.com/*",
+    "https://chatgpt.com/*"
   ],
   "background": {
     "service_worker": "background.js"

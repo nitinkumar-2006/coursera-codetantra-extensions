@@ -254,13 +254,13 @@
         '#ct-helper-panel, aside, nav, header, .navbar, [class*="sidebar" i], [class*="drawer" i], [class*="toc" i], .cm-editor, .ace_editor, .monaco-editor, .CodeMirror, script, style, [aria-hidden="true"], .hidden, .d-none, [style*="display: none"], [style*="display:none"]'
       )
       .forEach((el) => el.remove());
-    // Strip any hidden CodeTantra TOC / search-modal container that wasn't caught by class names
-    Array.from(clone.querySelectorAll("div, ul, section")).forEach((el) => {
+    // Strip any hidden OR open CodeTantra TOC / search-modal container that wasn't caught by class names
+    Array.from(clone.querySelectorAll("div, ul, section, nav")).forEach((el) => {
       const t = (el.innerText || "").trim();
       if (
-        t.length > 120 &&
+        t.length > 60 &&
         (/search content|minimum 3 characters required for search|1\.1\.1\.\s*what is data structure|36\.1\.1\.\s*rat in a maze/i.test(t) ||
-          (t.match(/\b\d+\.\d+\.\d+\./g) || []).length >= 5)
+          (t.match(/\b\d+\.\d+\.\d+\./g) || []).length >= 4)
       ) {
         el.remove();
       }
@@ -914,7 +914,7 @@
     return diffLines.length ? `EXACT EXPECTED vs ACTUAL MISMATCHES:\n${diffLines.join("\n")}` : "";
   }
 
-  // Extract dedicated 'Compilation Error' panel text (e.g. "error in Hashing.java, line no: 16 ... constructor node in class node cannot be applied to given types;")
+  // Extract dedicated 'Compilation Error' panel text in FULL (never cutting off 'symbol: method ...' or 'location: class ...'!)
   function extractCompilationErrorBlock(doc) {
     if (!doc || !doc.body) return "";
     const win = doc.defaultView || window;
@@ -928,13 +928,19 @@
         return t === "compilation error" || t === "runtime error" || t === "compile error";
       });
       for (const h of headings) {
+        let bestText = "";
         let box = h.parentElement;
-        for (let up = 0; up < 4 && box && box !== doc.body; up++) {
+        for (let up = 0; up < 5 && box && box !== doc.body; up++) {
+          const r = box.getBoundingClientRect();
           const t = (box.innerText || "").trim();
-          if (t.length > 35 && t.length < 2500) {
-            return `COMPILATION / RUNTIME ERROR:\n${t}`;
-          }
+          const low = normalizeText(t);
+          // Stay strictly inside the right-side error drawer (never climb up into Sample Test Cases / left pane!)
+          if (r.left < minRightX - 20 || low.includes("sample test cases") || t.length > 3200) break;
+          if (t.length > bestText.length) bestText = t;
           box = box.parentElement;
+        }
+        if (bestText.length > 25) {
+          return `COMPILATION / RUNTIME ERROR:\n${bestText}`;
         }
       }
     } catch {}

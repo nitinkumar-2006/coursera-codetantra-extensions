@@ -315,7 +315,7 @@ function createPanel() {
     <div style="font-weight: 600; margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center; gap:6px;">
       <span style="display:flex; align-items:center; gap:5px; flex-wrap:nowrap;">
         <span style="color:#ffffff; white-space:nowrap; font-size:13px;">CodeTantra</span>
-        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v10.10</span>
+        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v11.1</span>
         <button id="ct-mode-btn" class="ct-icon-btn ct-mode-active" title="Active AI Mode (click to toggle Web / API)">Web</button>
       </span>
       <span style="display:flex; align-items:center; gap:6px;">
@@ -731,7 +731,31 @@ function extractJsonFromText(raw) {
   return lastBrace > firstBrace ? cleaned.slice(firstBrace, lastBrace + 1) : cleaned;
 }
 
-async function callGemini(prompt, { expectJson = true } = {}) {
+async function callChatGptWeb(prompt) {
+  setStatus("AI: ChatGPT Fallback...", "#93c5fd");
+  setOutput("Gemini same error par fasa tha — ChatGPT (chatgpt.com) se second opinion laa raha hoon...");
+  try {
+    const res = await new Promise((resolve) => {
+      let done = false;
+      const finish = (v) => { if (!done) { done = true; clearTimeout(t); resolve(v); } };
+      const t = setTimeout(() => finish({ ok: false, error: "ChatGPT Web timeout (100s)." }), 100000);
+      chrome.runtime.sendMessage({ type: "CHATGPT_WEB_ASK", prompt }, (reply) => {
+        if (chrome.runtime.lastError) finish({ ok: false, error: chrome.runtime.lastError.message });
+        else finish(reply || { ok: false, error: "ChatGPT worker se reply nahi mila." });
+      });
+    });
+    if (res && res.ok && res.rawText) return { ok: true, model: res.model || "ChatGPT Web", rawText: res.rawText };
+    return { ok: false, error: res?.error || "ChatGPT Web failed." };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+async function callGemini(prompt, { expectJson = true, useChatGptFallback = false } = {}) {
+  if (useChatGptFallback && isWebMode()) {
+    const gptRes = await callChatGptWeb(prompt);
+    if (gptRes && gptRes.ok) return gptRes;
+  }
   // ZERO-API-KEY MODE: Route directly through logged-in gemini.google.com background tab!
   if (isWebMode()) {
     setStatus("AI: Gemini Web...", "#93c5fd");
@@ -1021,6 +1045,8 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
 
   // NEVER wipe working code with Reset on compiler/class errors — read the exact error and fix ONLY the broken editable slot(s)!
   let activeEdState = edState;
+  let lastTypedCodeFingerprint = "";
+  let consecutiveSameCode = 0;
 
   for (let attempt = 1; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
     let currentState = attempt === 1 ? activeEdState : await callBridge("READ_EDITOR", {}, 10000);
@@ -1080,9 +1106,9 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
       ? editableSlots.map((s) => `Slot ${s.id}: Lines ${s.start_line}-${s.end_line}`).join(", ")
       : "Slot 1: Full file";
 
-    const prompt = `You are a senior software engineer solving a CodeTantra coding problem (Python, Java, C++, C, etc.).
+    const prompt = `You are a senior software engineer helping me fix and solve a CodeTantra coding problem (${lang}).
 
-${previousError ? `CRITICAL — FIX THIS EXACT COMPILER / TEST-CASE FAILURE! Rewrite the broken <<< EDITABLE SLOT N >>> cleanly so it compiles with ZERO errors and passes ALL test cases:\n${previousError}\n${errRequiredPkg ? `MANDATORY: Line 1 MUST have '${errRequiredPkg}' and the main class MUST be '${errRequiredClass}'!\n` : ""}\n` : ""}Detected Language: ${lang}
+${previousError ? `I just ran the current code below in CodeTantra and got this EXACT error:\n${previousError}\n${errRequiredPkg ? `MANDATORY: Line 1 MUST have '${errRequiredPkg}' and the main class MUST be '${errRequiredClass}'!\n` : ""}Please check the exact line number, symbol/method name, and every method called by [LOCKED] lines (for example, if a [LOCKED] line calls a helper method that is missing, implement that exact method with the exact signature inside an <<< EDITABLE SLOT N >>>!). Fix the exact cause of this error so it compiles cleanly and passes all test cases.\n\n` : ""}Detected Language: ${lang}
 Editable Slots to fill/fix: ${slotGuide}
 
 Problem Statement & Sample Test Cases:
@@ -1091,13 +1117,16 @@ ${problemText}
 Current Code in Editor (ONLY the code inside <<< EDITABLE SLOT N >>> ... <<< END SLOT N >>> can be changed; NEVER repeat or modify [LOCKED] lines):
 ${slottedCode}
 
-OUTPUT FORMAT — DO NOT USE JSON! Return ONLY the raw replacement code for each editable slot wrapped in exact tags like this:
+OUTPUT FORMAT — DO NOT USE JSON! Wrap your ENTIRE reply inside ONE fenced code block (triple backticks) so exact 4-space Python indentation and __init__ underscores are NEVER stripped:
+\`\`\`text
 <<<SLOT 1>>>
-...complete compiling replacement code for EDITABLE SLOT 1 ONLY (NO [LOCKED] lines, NO JSON escaping)...
+...complete compiling replacement code for EDITABLE SLOT 1 ONLY (NO [LOCKED] lines, exact indentation)...
 <<<END_SLOT 1>>>
+\`\`\`
 
 Strict Rules:
 - Write ONLY in ${lang}!
+- CRITICAL FOR PYTHON: ALWAYS wrap your <<<SLOT N>>> output inside triple backticks so 4-space/8-space indentation and double underscores (__init__, __str__) are 100% preserved! Every method inside a class MUST be indented 4 spaces, and every statement inside a method/if/for MUST be indented +4 spaces!
 - Format code cleanly on multiple lines with proper indentation (NEVER put multiple statements on a single line!).
 - Read the EXACT input format specified in the Problem Statement (e.g., read 'int n = sc.nextInt();' first, then 'for (int i = 0; i < n; i++)' — NEVER use 'while (sc.hasNextInt())' when 'n' is given, or CodeTantra will fail with "reading more inputs than expected"!).
 - Return COMPLETE, compiling, balanced-braces code for EVERY <<< EDITABLE SLOT N >>> that needs code or fixes.
@@ -1105,7 +1134,8 @@ Strict Rules:
 - Match Sample Test Cases & Expected vs Actual output character-for-character (spaces, arrows, punctuation, newlines).
 - Preserve exact indentation (especially 4 spaces in Python) and preserve existing Java 'package ...;' and 'public class ...' names.`;
 
-    const apiRes = await callGemini(prompt, { expectJson: false });
+    const shouldUseChatGpt = isWebMode() && (consecutiveSameCode >= 1 || attempt === 3 || attempt === 5);
+    const apiRes = await callGemini(prompt, { expectJson: false, useChatGptFallback: shouldUseChatGpt });
     if (!apiRes.ok) {
       setStatus("API Error", "#f87171");
       setOutput(`Gemini Error:\n${apiRes.error}`);
@@ -1114,9 +1144,14 @@ Strict Rules:
 
     const rawReply = (apiRes.rawText || "").trim();
     const fullFileLines = (currentState.code || "").replace(/\r\n/g, "\n").split("\n");
+    const isPythonLang = /python/i.test(lang || "");
     function cleanSlotCode(slotMeta, codeStr) {
       let c = (codeStr || "").replace(/\r\n/g, "\n");
       c = c.replace(/^```[a-z0-9+#-]*\s*\n/i, "").replace(/\n```\s*$/, "");
+      if (isPythonLang) {
+        // Guard against Markdown stripping double underscores from Python dunder methods
+        c = c.replace(/^(\s*def\s+)init(\s*\()/gm, "$1__init__$2").replace(/^(\s*def\s+)str(\s*\()/gm, "$1__str__$2");
+      }
       if (!slotMeta) return c;
       const slotLines = c.split("\n");
       const prevLocked = slotMeta.start_line > 1 ? (fullFileLines[slotMeta.start_line - 2] || "").trim() : "";
@@ -1239,6 +1274,35 @@ Strict Rules:
     }
 
     const assembledPreview = assembleCode(currentState.code, edits);
+
+    // PYTHON INDENTATION GUARD: Catch zero-indented class/def bodies BEFORE typing into editor!
+    if (isPythonLang && /^class\s+\w+[^:]*:\s*\n\s{0}(?:def|self\.|pass|return)/m.test(assembledPreview)) {
+      if (attempt < MAX_FIX_ATTEMPTS) {
+        previousError =
+          (previousError ? previousError + "\n" : "") +
+          "CRITICAL PYTHON INDENTATION ERROR: Your previous reply had 0 spaces before 'def' inside a class! Wrap your ENTIRE <<<SLOT 1>>> output inside a triple-backtick code block (```python ... ```) with exact 4-space and 8-space indentation!";
+        setStatus(`Indent retry (${attempt})...`, "#facc15");
+        setOutput("Python indentation missing thi — code block mein proper 4-space indentation maang raha hoon...");
+        continue;
+      }
+    }
+
+    // SAME-CODE LOOP BREAKER: Never waste time deleting & retyping the EXACT same broken code!
+    const codeFingerprint = assembledPreview.replace(/\s+/g, " ").trim();
+    if (attempt > 1 && codeFingerprint && codeFingerprint === lastTypedCodeFingerprint) {
+      consecutiveSameCode++;
+      if (attempt < MAX_FIX_ATTEMPTS) {
+        previousError =
+          `STOP! You returned the EXACT SAME BROKEN CODE that already failed! You MUST actually fix the bug below:\n` +
+          (previousError || "Fix the compilation/test-case error.");
+        setStatus(`Same code — switching AI...`, "#facc15");
+        setOutput("AI ne exact wahi purana galat code de diya — dobara type nahi kar raha, ChatGPT/fresh fix try kar raha hoon...");
+        continue;
+      }
+    } else {
+      consecutiveSameCode = 0;
+      lastTypedCodeFingerprint = codeFingerprint;
+    }
     const origPkg = (currentState.code || "").match(/^\s*package\s+[^;]+;/m)?.[0] || errRequiredPkg || "";
     const origPubClass = (currentState.code || "").match(/public\s+class\s+([A-Za-z0-9_]+)/)?.[1] || errRequiredClass || "";
     const structuralWarnings = [];
