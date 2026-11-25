@@ -21,10 +21,10 @@ try {
     }
     localStorage.setItem("ct_seeded_key_5cfg", "done");
   }
-  // v9.4: Always respect CodeTantra's manual language dropdown (clear old forced JAVA override)
-  if (localStorage.getItem("ct_v94_lang_reset") !== "done") {
-    localStorage.setItem("ct_preferred_lang", "auto");
-    localStorage.setItem("ct_v94_lang_reset", "done");
+  // v10.9: Default to Java on multi-language DSA questions (editable anytime inside ⚙ Settings drawer)
+  if (localStorage.getItem("ct_v109_default_java") !== "done") {
+    localStorage.setItem("ct_preferred_lang", "java");
+    localStorage.setItem("ct_v109_default_java", "done");
   }
 } catch {}
 
@@ -35,7 +35,7 @@ const VERIFIED_WORKING_MODELS = [
   "gemini-3.5-flash-lite"
 ];
 
-const BLOCKED_SLIDE_PATTERNS = [/\b29\.1\.6\b/i, /koko eating bananas/i];
+const BLOCKED_SLIDE_PATTERNS = [];
 function isBlockedSlideText(text) {
   const t = (text || "").replace(/\s+/g, " ").trim();
   return BLOCKED_SLIDE_PATTERNS.some((re) => re.test(t));
@@ -46,7 +46,7 @@ let failedModelUntil = new Map();
 let apiCooldownUntil = 0;
 
 const RETRYABLE_HTTP_CODES = new Set([400, 403, 404, 408, 429, 500, 502, 503, 504]);
-const MAX_FIX_ATTEMPTS = 3;
+const MAX_FIX_ATTEMPTS = 6;
 
 let autoMode = false;
 let autoInterval = null;
@@ -315,21 +315,31 @@ function createPanel() {
     <div style="font-weight: 600; margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center; gap:6px;">
       <span style="display:flex; align-items:center; gap:5px; flex-wrap:nowrap;">
         <span style="color:#ffffff; white-space:nowrap; font-size:13px;">CodeTantra</span>
-        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v10.2</span>
+        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v10.10</span>
         <button id="ct-mode-btn" class="ct-icon-btn ct-mode-active" title="Active AI Mode (click to toggle Web / API)">Web</button>
       </span>
       <span style="display:flex; align-items:center; gap:6px;">
         <span id="ct-status" style="color:#e5e7eb; font-size:11px; font-weight:500; max-width:110px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">Idle</span>
-        <button id="ct-settings-btn" class="ct-icon-btn" title="Settings: Mode, API Key & Typing Speed" style="padding:2px 6px; font-size:11px;">⚙</button>
+        <button id="ct-settings-btn" class="ct-icon-btn" title="Settings: Mode, Language, API Key & Typing Speed" style="padding:2px 6px; font-size:11px;">⚙</button>
       </span>
     </div>
     <div id="ct-settings-drawer" style="display:none; margin-bottom:10px; padding:9px 10px; border-radius:11px; background:rgba(10,12,18,0.78); border:1px solid rgba(255,255,255,0.16);">
-      <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; margin-bottom:9px; padding-bottom:8px; border-bottom:1px solid rgba(255,255,255,0.10);">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid rgba(255,255,255,0.10);">
         <span style="display:flex; gap:5px;">
           <button id="ct-pick-web" class="ct-icon-btn" style="padding:3px 8px;">Web</button>
           <button id="ct-pick-api" class="ct-icon-btn" style="padding:3px 8px;">API</button>
         </span>
         <button id="ct-set-key" class="ct-icon-btn ct-key-missing" style="padding:3px 8px;" title="Set CodeTantra-only Gemini API Key">Set Key</button>
+      </div>
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:4px; margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid rgba(255,255,255,0.10);">
+        <span style="font-size:11px; color:#e5e7eb;">Lang:</span>
+        <span style="display:flex; gap:4px;">
+          <button class="ct-icon-btn ct-lang-chip" data-lang="java" style="padding:2px 7px;">Java</button>
+          <button class="ct-icon-btn ct-lang-chip" data-lang="cpp" style="padding:2px 6px;">C++</button>
+          <button class="ct-icon-btn ct-lang-chip" data-lang="c" style="padding:2px 6px;">C</button>
+          <button class="ct-icon-btn ct-lang-chip" data-lang="python" style="padding:2px 6px;">Py</button>
+          <button class="ct-icon-btn ct-lang-chip" data-lang="auto" style="padding:2px 6px;">Auto</button>
+        </span>
       </div>
       <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; font-size:11px; color:#e5e7eb;">
         <span>Typing Speed: <b id="ct-speed-val" style="color:#86efac;">8s</b></span>
@@ -386,6 +396,7 @@ function createPanel() {
   function setAiMode(mode) {
     localStorage.setItem("ct_ai_mode", mode === "api" ? "api" : "web");
     apiCooldownUntil = 0;
+    failedUrls.delete(window.location.href);
     syncModeBtn();
     setStatus(mode === "web" ? "Web Active ✓" : "API Active ✓", "#86efac");
     setOutput(
@@ -418,6 +429,23 @@ function createPanel() {
   settingsBtn.addEventListener("click", () => {
     if (!settingsDrawer) return;
     settingsDrawer.style.display = settingsDrawer.style.display === "none" ? "block" : "none";
+  });
+
+  // Auto-Language Switcher inside Settings Drawer (default: Java for DSA)
+  const langChips = Array.from(panel.querySelectorAll(".ct-lang-chip"));
+  function applyPreferredLang(langVal) {
+    const normalized = langVal || "java";
+    localStorage.setItem("ct_preferred_lang", normalized);
+    langChips.forEach((chip) => {
+      chip.classList.toggle("ct-mode-active", chip.dataset.lang === normalized);
+    });
+  }
+  applyPreferredLang(localStorage.getItem("ct_preferred_lang") || "java");
+  langChips.forEach((chip) => {
+    chip.addEventListener("click", () => {
+      applyPreferredLang(chip.dataset.lang);
+      setStatus(`Lang: ${chip.dataset.lang.toUpperCase()}`, "#86efac");
+    });
   });
 
   // Typing Speed Grid inside Settings Drawer (1s - 60s)
@@ -612,6 +640,7 @@ function setAutoMode(enabled) {
   }
 
   apiCooldownUntil = 0;
+  failedUrls.delete(window.location.href);
   autoInterval = setInterval(runAutoTick, 1000);
   runAutoTick();
 }
@@ -683,16 +712,26 @@ async function fetchWithTimeout(url, options, timeoutMs = 45000) {
 }
 
 function extractJsonFromText(raw) {
-  const cleaned = (raw || "").replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/i, "").trim();
+  const str = (raw || "").trim();
+  const fenced = str.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const cleaned = (fenced ? fenced[1] : str).trim();
   const firstBrace = cleaned.indexOf("{");
-  const lastBrace = cleaned.lastIndexOf("}");
-  if (firstBrace !== -1 && lastBrace > firstBrace) {
-    return cleaned.slice(firstBrace, lastBrace + 1);
+  if (firstBrace === -1) return cleaned;
+  let endIdx = cleaned.lastIndexOf("}");
+  while (endIdx > firstBrace) {
+    const candidate = cleaned.slice(firstBrace, endIdx + 1);
+    try {
+      JSON.parse(candidate);
+      return candidate;
+    } catch {
+      endIdx = cleaned.lastIndexOf("}", endIdx - 1);
+    }
   }
-  return cleaned;
+  const lastBrace = cleaned.lastIndexOf("}");
+  return lastBrace > firstBrace ? cleaned.slice(firstBrace, lastBrace + 1) : cleaned;
 }
 
-async function callGemini(prompt) {
+async function callGemini(prompt, { expectJson = true } = {}) {
   // ZERO-API-KEY MODE: Route directly through logged-in gemini.google.com background tab!
   if (isWebMode()) {
     setStatus("AI: Gemini Web...", "#93c5fd");
@@ -711,7 +750,7 @@ async function callGemini(prompt) {
         });
       });
       if (res && res.ok && res.rawText) {
-        return { ok: true, model: res.model || "Gemini Web (Free)", rawText: extractJsonFromText(res.rawText) };
+        return { ok: true, model: res.model || "Gemini Web (Free)", rawText: expectJson ? extractJsonFromText(res.rawText) : res.rawText };
       }
       apiCooldownUntil = Date.now() + 20000;
       return { ok: false, error: res?.error || "Gemini Web se reply nahi mila. Check karo gemini.google.com tab logged in hai." };
@@ -748,7 +787,7 @@ async function callGemini(prompt) {
         const bodyObj = {
           contents: [{ parts: [{ text: prompt }] }]
         };
-        if (!isGemma) {
+        if (expectJson && !isGemma) {
           bodyObj.generationConfig = { responseMimeType: "application/json" };
         }
 
@@ -774,7 +813,7 @@ async function callGemini(prompt) {
             if (keyList) {
               cachedModelsByKey.set(apiKey, [model, ...keyList.filter((m) => m !== model)]);
             }
-            return { ok: true, model, rawText: extractJsonFromText(rawText) };
+            return { ok: true, model, rawText: expectJson ? extractJsonFromText(rawText) : rawText };
           }
         }
 
@@ -850,7 +889,7 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
     setStatus(`Switching -> ${prefLang.toUpperCase()}`, "#60a5fa");
     const sw = await callBridge("SWITCH_LANG", { lang: prefLang }, 4000);
     if (sw && sw.ok && !sw.already) {
-      const refreshed = await callBridge("READ_EDITOR", {}, 4500);
+      const refreshed = await callBridge("READ_EDITOR", {}, 10000);
       if (refreshed && refreshed.found) edState = refreshed;
     }
   }
@@ -859,22 +898,112 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
   setStatus("Opening test cases...", "#60a5fa");
   setOutput("Sample Test Cases aur Question Hints khol kar padh raha hoon...");
   const expandedInfo = await callBridge("EXPAND_PROBLEM_PANELS", {}, 5000);
+  function getCleanTopFallbackText() {
+    try {
+      const c = document.body.cloneNode(true);
+      c.querySelectorAll("#ct-helper-panel, header, nav, .navbar, script, style").forEach((el) => el.remove());
+      return (c.innerText || "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 9000);
+    } catch {
+      return "";
+    }
+  }
   const problemText =
     expandedInfo && expandedInfo.problemText && expandedInfo.problemText.length > (edState.problemText || "").length
       ? expandedInfo.problemText
       : edState.problemText && edState.problemText.length > 60
       ? edState.problemText
-      : (document.body.innerText || "").slice(0, 15000);
+      : getCleanTopFallbackText();
   const tcOpened = /test case\s*1/i.test(problemText);
 
-  const existingEval = await callBridge("EVAL_TESTS", {}, 3000);
-  if (autoSubmitAndNext && existingEval && existingEval.status === "passed") {
+  function buildEditableSlots(code, lockedLines = []) {
+    const lines = (code || "").replace(/\r\n/g, "\n").split("\n");
+    const lockedSet = new Set(lockedLines || []);
+    const slots = [];
+    let start = -1;
+    for (let ln = 1; ln <= lines.length; ln++) {
+      if (!lockedSet.has(ln)) {
+        if (start === -1) start = ln;
+      } else if (start !== -1) {
+        slots.push({
+          id: slots.length + 1,
+          start_line: start,
+          end_line: ln - 1,
+          code: lines.slice(start - 1, ln - 1).join("\n")
+        });
+        start = -1;
+      }
+    }
+    if (start !== -1) {
+      slots.push({
+        id: slots.length + 1,
+        start_line: start,
+        end_line: lines.length,
+        code: lines.slice(start - 1).join("\n")
+      });
+    }
+    return slots;
+  }
+
+  function formatCodeWithSlots(code, lockedLines = [], slots = []) {
+    const lines = (code || "").replace(/\r\n/g, "\n").split("\n");
+    if (!lines.length || (lines.length === 1 && !lines[0].trim())) return "<<< EDITABLE SLOT 1 (Empty File) >>>\n<<< END SLOT 1 >>>";
+    const slotStartMap = new Map(slots.map((s) => [s.start_line, s]));
+    const slotEndMap = new Map(slots.map((s) => [s.end_line, s]));
+    const lockedSet = new Set(lockedLines || []);
+    const out = [];
+    for (let ln = 1; ln <= lines.length; ln++) {
+      const st = slotStartMap.get(ln);
+      if (st) out.push(`<<< EDITABLE SLOT ${st.id} (Lines ${st.start_line}-${st.end_line}) >>>`);
+      out.push(`${ln} ${lockedSet.has(ln) ? "[LOCKED]" : "[EDITABLE]"}: ${lines[ln - 1]}`);
+      const en = slotEndMap.get(ln);
+      if (en) out.push(`<<< END SLOT ${en.id} >>>`);
+    }
+    return out.join("\n");
+  }
+
+  const initialSlots = buildEditableSlots(edState.code, edState.lockedLines);
+  const existingEditableChars = initialSlots
+    .map((s) => s.code.replace(/\/\/.*|\/\*[\s\S]*?\*\/|#.*|\s+/g, "").length)
+    .reduce((a, b) => a + b, 0);
+
+  let existingEval = await callBridge("EVAL_TESTS", {}, 7500);
+  // GUARD against stale 'Passed' badges carried over from the previous question in CodeTantra's SPA:
+  // Only treat as Already Passed if the current editor actually has real solution code written (> 60 non-comment chars)!
+  if (autoSubmitAndNext && existingEval && existingEval.status === "passed" && existingEditableChars > 60) {
     solvedUrls.add(window.location.href);
     setStatus("Already Passed ✓", "#86efac");
     setOutput(`${existingEval.summary}\nAgle question par jaa raha hoon...`);
     await sleep(1200);
     await clickNextSlide();
     return;
+  }
+
+  // PRE-CHECK SUBMIT: If editor ALREADY has written code in [EDITABLE] slots and no test result is shown yet, Submit ONCE first to get the exact compiler/test-case error!
+  if ((!existingEval || existingEval.status === "unknown") && existingEditableChars > 90) {
+    setStatus("Checking existing code...", "#60a5fa");
+    setOutput("Editor mein code pehle se likha hai — pehle Submit karke exact error / test-case diff nikal raha hoon...");
+    const preSub = await callBridge("CLICK_BUTTON", { targets: ["submit", "submit code", "compile & run"], preferEditorSubmit: true }, 3000);
+    if (preSub && preSub.ok) {
+      await sleep(1200);
+      for (let poll = 0; poll < 16; poll++) {
+        await sleep(750);
+        const checkRes = await callBridge("EVAL_TESTS", {}, 7500);
+        if (checkRes && (checkRes.status === "passed" || checkRes.status === "failed")) {
+          existingEval = checkRes;
+          break;
+        }
+      }
+      if (existingEval && existingEval.status === "passed") {
+        solvedUrls.add(window.location.href);
+        setStatus("100% Passed ✓", "#86efac");
+        setOutput(`${existingEval.summary}\nExisting code pehle se pass ho gaya!${autoSubmitAndNext ? " Next par jaa raha hoon..." : ""}`);
+        if (autoSubmitAndNext) {
+          await sleep(1000);
+          await clickNextSlide();
+        }
+        return;
+      }
+    }
   }
 
   function extractJavaPkgAndClassFromError(errText) {
@@ -886,28 +1015,16 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
     return { pkg: "", cls: "" };
   }
 
-  // Helper: Click CodeTantra's yellow Reset button (+ confirm modal if shown) to restore clean starter + pink locked lines
-  async function resetCodeEditor(reasonText) {
-    setStatus("Auto-Resetting...", "#facc15");
-    setOutput(`${reasonText}\nReset button daba kar fresh starter code wapas laa raha hoon...`);
-    const r1 = await callBridge("CLICK_BUTTON", { targets: ["reset", "reset code"] }, 3000);
-    if (!r1 || !r1.ok) return false;
-    await sleep(600);
-    // Confirm reset popup if CodeTantra asks "Are you sure?"
-    await callBridge("CLICK_BUTTON", { targets: ["yes", "confirm", "ok", "yes, reset"] }, 1500);
-    await sleep(1500);
-    return true;
-  }
-
-  // If previous run failed (e.g. NoClassDefFoundError / wrong name: q38399/...), read it immediately on Attempt 1!
+  // If previous run failed (e.g. Compilation Error / Expected vs Actual mismatch), read it immediately on Attempt 1!
   let previousError = existingEval && existingEval.status === "failed" ? existingEval.summary || "" : "";
   let { pkg: errRequiredPkg, cls: errRequiredClass } = extractJavaPkgAndClassFromError(previousError);
 
-  // NEVER wipe working code with Reset on compiler/class errors — read the exact error and fix ONLY the broken line(s)!
+  // NEVER wipe working code with Reset on compiler/class errors — read the exact error and fix ONLY the broken editable slot(s)!
   let activeEdState = edState;
 
   for (let attempt = 1; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
-    let currentState = attempt === 1 ? activeEdState : await callBridge("READ_EDITOR", {}, 5000);
+    let currentState = attempt === 1 ? activeEdState : await callBridge("READ_EDITOR", {}, 10000);
+    const editableSlots = buildEditableSlots(currentState.code, currentState.lockedLines);
     const latestErrInfo = extractJavaPkgAndClassFromError(previousError);
     if (latestErrInfo.pkg) errRequiredPkg = latestErrInfo.pkg;
     if (latestErrInfo.cls) errRequiredClass = latestErrInfo.cls;
@@ -935,7 +1052,7 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
         let evalRes = { status: "unknown", summary: "" };
         for (let poll = 0; poll < 22; poll++) {
           await sleep(800);
-          evalRes = await callBridge("EVAL_TESTS", {}, 2000);
+          evalRes = await callBridge("EVAL_TESTS", {}, 7500);
           if (evalRes && (evalRes.status === "passed" || evalRes.status === "failed")) break;
         }
         if (evalRes.status === "passed") {
@@ -958,67 +1075,137 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
         : `Editor: ${currentState.type.toUpperCase()} (${lang}) | Test Cases: ${tcOpened ? "Opened ✓" : "Read"}\nStep 2: Andar hi code blueprint bana raha hoon...`
     );
 
+    const slottedCode = formatCodeWithSlots(currentState.code, currentState.lockedLines, editableSlots);
+    const slotGuide = editableSlots.length
+      ? editableSlots.map((s) => `Slot ${s.id}: Lines ${s.start_line}-${s.end_line}`).join(", ")
+      : "Slot 1: Full file";
+
     const prompt = `You are a senior software engineer solving a CodeTantra coding problem (Python, Java, C++, C, etc.).
 
-Detected Language: ${lang}
+${previousError ? `CRITICAL — FIX THIS EXACT COMPILER / TEST-CASE FAILURE! Rewrite the broken <<< EDITABLE SLOT N >>> cleanly so it compiles with ZERO errors and passes ALL test cases:\n${previousError}\n${errRequiredPkg ? `MANDATORY: Line 1 MUST have '${errRequiredPkg}' and the main class MUST be '${errRequiredClass}'!\n` : ""}\n` : ""}Detected Language: ${lang}
+Editable Slots to fill/fix: ${slotGuide}
 
 Problem Statement & Sample Test Cases:
 ${problemText}
 
-${previousError ? `CRITICAL — SURGICAL FIX ONLY! READ THIS EXACT COMPILER / TEST-CASE ERROR AND FIX ONLY THE BROKEN LINE(S):\n${previousError}\n${errRequiredPkg ? `MANDATORY: Line 1 MUST have '${errRequiredPkg}' and the main class MUST be '${errRequiredClass}'!\n` : ""}FORBIDDEN: NEVER use "mode": "replace_all" and NEVER rewrite unchanged methods! Return ONLY the minimal "replace_lines" edit(s) for the exact broken line range!\n\n` : ""}Current Code in Editor (1-based line numbers with [LOCKED] vs [EDITABLE] hints):
-${numberedStarter}
-Return ONLY valid JSON in this exact format:
-{
-  "dry_run_output": "exact simulated stdout of the final complete program on Sample Test Case 1",
-  "edits": [
-    {
-      "mode": "replace_lines",
-      "start_line": 2,
-      "end_line": 2,
-      "code": "    def send(self):\\n        print(\\"Sending Email\\")"
-    }
-  ],
-  "notes": "short 1-line summary"
-}
+Current Code in Editor (ONLY the code inside <<< EDITABLE SLOT N >>> ... <<< END SLOT N >>> can be changed; NEVER repeat or modify [LOCKED] lines):
+${slottedCode}
+
+OUTPUT FORMAT — DO NOT USE JSON! Return ONLY the raw replacement code for each editable slot wrapped in exact tags like this:
+<<<SLOT 1>>>
+...complete compiling replacement code for EDITABLE SLOT 1 ONLY (NO [LOCKED] lines, NO JSON escaping)...
+<<<END_SLOT 1>>>
 
 Strict Rules:
-- STRICT LANGUAGE RULE: Write the entire solution ONLY in ${lang}! NEVER write C/C++ (#include <stdio.h>) inside a Java/Python editor, and NEVER write Java inside a C/Python editor!
-- GROUND TRUTH = SAMPLE TEST CASES! Before finalizing edits, mentally dry-run the ENTIRE program (all [LOCKED] lines + your [EDITABLE] edits) against Sample Test Case 1 and put the exact printed stdout in "dry_run_output". Your dry_run_output MUST match the Sample Test Cases Expected Output character-for-character (even if a comment in starter code says something extra like 'also prints parent method' — do NOT print extra lines that are NOT in Expected Output!).
-- NEVER modify [LOCKED] lines!
-- Carefully check ALL [EDITABLE] lines — including class/function headers (e.g. changing 'class Painter:' to 'class Painter(Participant):' when inheritance is needed!), blank [EDITABLE] lines, placeholder comments, AND any broken/leftover lines from a previous failed attempt (remove/replace them cleanly!). NEVER use hacks like '__bases__'!
-- Replace ONLY [EDITABLE] lines using "mode": "replace_lines" with exact 1-based "start_line" and "end_line".
-- CRITICAL INDENTATION (especially Python): Preserve exact 4-space indentation levels (e.g. 4 spaces inside class/def, 8 spaces inside method body). Never use inconsistent tabs/spaces!
-- CRITICAL FOR JAVA / C++ / C: NEVER delete or rename existing 'package ...;' declarations, 'public class ...' names, imports, or starter class/method signatures! If starter code already exists (even if lines are [EDITABLE]), prefer "mode": "replace_lines" ONLY on the '// Fill the code...' / placeholder / buggy lines so you never break package or public class names!
-- Only use "mode": "replace_all" when the editor is completely empty or has no starter structure; if using "replace_all", you MUST preserve the exact 'package ...;' and 'public class ...' name from the original starter code!
-- No markdown code fences inside "code".`;
+- Write ONLY in ${lang}!
+- Format code cleanly on multiple lines with proper indentation (NEVER put multiple statements on a single line!).
+- Read the EXACT input format specified in the Problem Statement (e.g., read 'int n = sc.nextInt();' first, then 'for (int i = 0; i < n; i++)' — NEVER use 'while (sc.hasNextInt())' when 'n' is given, or CodeTantra will fail with "reading more inputs than expected"!).
+- Return COMPLETE, compiling, balanced-braces code for EVERY <<< EDITABLE SLOT N >>> that needs code or fixes.
+- Do NOT include any [LOCKED] lines inside <<<SLOT N>>> ... <<<END_SLOT N>>>!
+- Match Sample Test Cases & Expected vs Actual output character-for-character (spaces, arrows, punctuation, newlines).
+- Preserve exact indentation (especially 4 spaces in Python) and preserve existing Java 'package ...;' and 'public class ...' names.`;
 
-    const apiRes = await callGemini(prompt);
+    const apiRes = await callGemini(prompt, { expectJson: false });
     if (!apiRes.ok) {
       setStatus("API Error", "#f87171");
       setOutput(`Gemini Error:\n${apiRes.error}`);
       return;
     }
 
-    const cleaned = extractJsonFromText(apiRes.rawText);
-    let parsed = null;
-    try {
-      parsed = JSON.parse(cleaned);
-    } catch {
-      previousError = "Model returned invalid JSON — please return strictly valid JSON.";
-      setStatus(`JSON retry (${attempt})...`, "#facc15");
-      continue;
+    const rawReply = (apiRes.rawText || "").trim();
+    const fullFileLines = (currentState.code || "").replace(/\r\n/g, "\n").split("\n");
+    function cleanSlotCode(slotMeta, codeStr) {
+      let c = (codeStr || "").replace(/\r\n/g, "\n");
+      c = c.replace(/^```[a-z0-9+#-]*\s*\n/i, "").replace(/\n```\s*$/, "");
+      if (!slotMeta) return c;
+      const slotLines = c.split("\n");
+      const prevLocked = slotMeta.start_line > 1 ? (fullFileLines[slotMeta.start_line - 2] || "").trim() : "";
+      const nextLocked = slotMeta.end_line < fullFileLines.length ? (fullFileLines[slotMeta.end_line] || "").trim() : "";
+      if (prevLocked && slotLines.length > 1 && slotLines[0].trim() === prevLocked) slotLines.shift();
+      if (nextLocked && slotLines.length > 1 && slotLines[slotLines.length - 1].trim() === nextLocked) slotLines.pop();
+      return slotLines.join("\n");
     }
-    let edits = Array.isArray(parsed.edits)
-      ? parsed.edits
-      : parsed.code
-      ? [{ mode: parsed.mode || "replace_all", start_line: parsed.start_line || 1, end_line: parsed.end_line || 1, code: parsed.code }]
-      : [];
 
-    // Guard against malformed multi-Full hallucinated arrays (e.g. 50x replace_all blocks from flash-lite)
+    let parsed = { notes: "" };
+    let edits = [];
+    let usedSlotFormat = false;
+
+    // TIER 1 (ZERO JSON BUGS): Parse <<<SLOT N>>> ... <<<END_SLOT N>>> raw code blocks
+    const slotRegex = /<<<SLOT\s*(\d+)>>>\s*\n?([\s\S]*?)(?:\n?\s*<<<END_SLOT\s*\1>>>|$)/gi;
+    let sm;
+    while ((sm = slotRegex.exec(rawReply)) !== null) {
+      const slotId = parseInt(sm[1], 10);
+      const rawSlotBody = (sm[2] || "").replace(/\n+$/, "");
+      if (!rawSlotBody.trim()) continue;
+      const slotMeta = editableSlots.find((m) => m.id === slotId) || (editableSlots.length === 1 ? editableSlots[0] : null);
+      usedSlotFormat = true;
+      if (slotMeta) {
+        edits.push({
+          mode: (currentState.lockedLines || []).length === 0 && editableSlots.length === 1 ? "replace_all" : "replace_lines",
+          start_line: slotMeta.start_line,
+          end_line: slotMeta.end_line,
+          code: cleanSlotCode(slotMeta, rawSlotBody)
+        });
+      } else if ((currentState.lockedLines || []).length === 0) {
+        edits.push({ mode: "replace_all", start_line: 1, end_line: 1, code: cleanSlotCode(null, rawSlotBody) });
+      }
+    }
+
+    // TIER 2 (JSON Backup): If Gemini still replied in JSON format, parse slots/edits cleanly
+    if (!edits.length) {
+      try {
+        const maybeJson = JSON.parse(extractJsonFromText(rawReply));
+        parsed = maybeJson || parsed;
+        if (Array.isArray(maybeJson.slots) && maybeJson.slots.length > 0) {
+          usedSlotFormat = true;
+          for (const s of maybeJson.slots) {
+            if (!s || typeof s.code !== "string") continue;
+            const slotMeta = editableSlots.find((m) => m.id === Number(s.id)) || (editableSlots.length === 1 ? editableSlots[0] : null);
+            if (slotMeta) {
+              edits.push({
+                mode: (currentState.lockedLines || []).length === 0 && editableSlots.length === 1 ? "replace_all" : "replace_lines",
+                start_line: slotMeta.start_line,
+                end_line: slotMeta.end_line,
+                code: cleanSlotCode(slotMeta, s.code)
+              });
+            } else if ((currentState.lockedLines || []).length === 0) {
+              edits.push({ mode: "replace_all", start_line: 1, end_line: 1, code: cleanSlotCode(null, s.code) });
+            }
+          }
+        } else if (Array.isArray(maybeJson.edits) && maybeJson.edits.length > 0) {
+          edits = maybeJson.edits;
+        } else if (typeof maybeJson.code === "string" && maybeJson.code.trim()) {
+          edits = [{ mode: maybeJson.mode || "replace_all", start_line: maybeJson.start_line || 1, end_line: maybeJson.end_line || 1, code: maybeJson.code }];
+        }
+      } catch {}
+    }
+
+    // TIER 3 (Plain Fenced Code Fallback): Never throw away a working ```java / ```python code block!
+    if (!edits.length && editableSlots.length === 1) {
+      const fenceBlocks = [];
+      const fenceRe = /```[a-z0-9+#-]*\s*\n([\s\S]*?)```/gi;
+      let fm;
+      while ((fm = fenceRe.exec(rawReply)) !== null) {
+        if ((fm[1] || "").trim().length > 15) fenceBlocks.push(fm[1]);
+      }
+      const bestFence = fenceBlocks.sort((a, b) => b.length - a.length)[0];
+      if (bestFence) {
+        usedSlotFormat = true;
+        const slotMeta = editableSlots[0];
+        edits.push({
+          mode: (currentState.lockedLines || []).length === 0 ? "replace_all" : "replace_lines",
+          start_line: slotMeta.start_line,
+          end_line: slotMeta.end_line,
+          code: cleanSlotCode(slotMeta, bestFence)
+        });
+      }
+    }
+
+    // Guard against malformed multi-Full hallucinated arrays
     if (edits.length > 1 && edits.every((e) => e.mode === "replace_all" || !e.start_line)) {
       edits = [{ mode: "replace_all", start_line: 1, end_line: 1, code: edits.map((e) => e.code || "").join("\n") }];
     } else if (edits.length > 12) {
-      previousError = "Too many fragmented edit blocks returned. Return 1 clean edit block per editable region.";
+      previousError = (previousError ? previousError + "\n" : "") + "Return 1 clean <<<SLOT N>>> block per editable region.";
       setStatus(`Cleanup retry (${attempt})...`, "#facc15");
       continue;
     }
@@ -1027,13 +1214,13 @@ Strict Rules:
       if (attempt < MAX_FIX_ATTEMPTS) {
         previousError =
           (previousError ? previousError + "\n" : "") +
-          "CRITICAL: You returned empty edits []. Tests FAILED or code has a bug — you MUST return non-empty replace_lines edits to fix the code!";
-        setStatus(`Empty retry (${attempt})...`, "#facc15");
+          "CRITICAL: Output your fixed code wrapped inside <<<SLOT 1>>> ... <<<END_SLOT 1>>> tags (plain code, NO JSON)!";
+        setStatus(`Format retry (${attempt})...`, "#facc15");
         continue;
       }
       failedUrls.add(window.location.href);
-      setStatus("Paused (no edit)", "#facc15");
-      setOutput("Gemini ne 3 tries mein bhi empty edits [] diya (infinite loop rok diya hai). Ek baar test case check karo ya 'Solve & Type' dabao.");
+      setStatus("Paused (no code)", "#facc15");
+      setOutput("Gemini se code extract nahi ho paya (3 tries complete). Raw reply check karo ya 'Solve & Type' dabao.");
       return;
     }
 
@@ -1169,7 +1356,9 @@ Task:
       return { mode: "replace_lines", start_line: startLine, end_line: endLine, code: changedSlice.join("\n") };
     }
 
-    if (attempt > 1 && (currentState.code || "").split("\n").length >= 5) {
+    const usedSlots = usedSlotFormat;
+    const hadCompileErr = /compilation error|illegal start|cannot find symbol|cannot be applied|error in /i.test(previousError || "");
+    if (attempt > 1 && !hadCompileErr && !usedSlots && (currentState.code || "").split("\n").length >= 5) {
       const targetFull = assembleCode(currentState.code, edits);
       const surgical = computeSurgicalDiffEdit(currentState.code, targetFull, currentState.lockedLines);
       if (surgical) {
@@ -1208,8 +1397,23 @@ Task:
 
     const typeRes = await callBridge("TYPE_CODE", { edits, targetTotalMs, lockedLines: currentState.lockedLines || [] }, 300000);
     if (!typeRes || !typeRes.ok) {
-      setStatus("Typing stopped", "#facc15");
-      setOutput(typeRes?.error || "Typing fail/stop ho gayi.");
+      const typeErr = typeRes?.error || "Typing fail/stop ho gayi.";
+      if (/stopped by user/i.test(typeErr)) {
+        setStatus("Typing stopped", "#facc15");
+        setOutput(typeErr);
+        return;
+      }
+      if (attempt < MAX_FIX_ATTEMPTS) {
+        previousError =
+          (previousError ? previousError + "\n" : "") +
+          `EDITOR REJECTED PREVIOUS EDITS: ${typeErr}. Return valid replace_lines edits ONLY on [EDITABLE] lines (never replace_all, never overlap [LOCKED] lines).`;
+        setStatus(`Edit retry (${attempt})...`, "#facc15");
+        setOutput(`Edit blocked: ${typeErr}\nRetry ${attempt + 1}/${MAX_FIX_ATTEMPTS} mein safe editable lines fix kar raha hoon...`);
+        continue;
+      }
+      failedUrls.add(window.location.href);
+      setStatus("Paused (edit err)", "#facc15");
+      setOutput(`Typing blocked (${typeErr}) — infinite loop rok diya hai. 'Solve & Type' dabakar manual retry kar sakte ho.`);
       return;
     }
 
@@ -1243,7 +1447,7 @@ Task:
     let evalRes = { status: "unknown", summary: "" };
     for (let poll = 0; poll < 25; poll++) {
       await sleep(800);
-      evalRes = await callBridge("EVAL_TESTS", {}, 2000);
+      evalRes = await callBridge("EVAL_TESTS", {}, 7500);
       if (evalRes && (evalRes.status === "passed" || evalRes.status === "failed")) {
         break;
       }
@@ -1254,7 +1458,7 @@ Task:
       await callBridge("CLICK_BUTTON", { targets: ["submit", "submit code", "compile & run"] }, 2500);
       for (let poll = 0; poll < 12; poll++) {
         await sleep(800);
-        evalRes = await callBridge("EVAL_TESTS", {}, 2000);
+        evalRes = await callBridge("EVAL_TESTS", {}, 7500);
         if (evalRes && (evalRes.status === "passed" || evalRes.status === "failed")) {
           break;
         }
@@ -1280,14 +1484,19 @@ Task:
 
     if (attempt === MAX_FIX_ATTEMPTS) {
       failedUrls.add(window.location.href);
-      setStatus("Paused (3/3 fail)", "#facc15");
-      setOutput(`3 tries ke baad ye error aaya (loop rok diya hai):\n${(evalRes.summary || "Manual check needed.").slice(0, 320)}`);
+      setStatus(`Paused (${MAX_FIX_ATTEMPTS}/${MAX_FIX_ATTEMPTS})`, "#facc15");
+      setOutput(`${MAX_FIX_ATTEMPTS} tries ke baad ye error aaya:\n${(evalRes.summary || "Manual check needed.").slice(0, 320)}`);
       return;
     }
 
     previousError = evalRes.summary || "Some test cases failed. Check exact indentation and output format.";
-    setOutput(`Test fail hua — error padh kar fix kar raha hoon...\n${previousError.slice(0, 300)}`);
+    setOutput(`Test fail hua (Try ${attempt}/${MAX_FIX_ATTEMPTS}) — error padh kar fix kar raha hoon...\n${previousError.slice(0, 300)}`);
   }
+
+  // Safety net: if all attempts ended via continue, pause this URL so runAutoTick NEVER loops every 1s!
+  failedUrls.add(window.location.href);
+  setStatus("Paused (check err)", "#facc15");
+  setOutput(`${MAX_FIX_ATTEMPTS} tries complete ho gaye:\n${(previousError || "Manual check needed.").slice(0, 300)}`);
 }
 
 // ---------------- 2. OBJECTIVE / MCQ QUESTION SOLVER ----------------
@@ -1468,7 +1677,7 @@ async function solveCurrentSlide({ autoSubmitAndNext = false } = {}) {
   if (solveBtn) solveBtn.innerText = "Stop";
 
   try {
-    const edState = await callBridge("READ_EDITOR", {}, 4500);
+    const edState = await callBridge("READ_EDITOR", {}, 10000);
     if (edState && edState.found) {
       await solveCodingProblem(edState, { autoSubmitAndNext });
       return;
@@ -1517,13 +1726,13 @@ async function runAutoTick() {
       return;
     }
 
-    // Give iframes, CodeMirror 6, and Pyodide time to mount cleanly
-    if (Date.now() - slideEnteredAt < 700) {
+    // Give CodeTantra SPA iframes, CodeMirror 6, and test panel 1.8s to mount & clear previous slide badges
+    if (Date.now() - slideEnteredAt < 1800) {
       setStatus("Loading slide...", "#9ca3af");
       return;
     }
 
-    // If this exact question already finished 3 attempts and failed, don't endlessly re-type it — pause until user moves or clicks Solve & Type!
+    // If this exact question already finished all attempts and failed, pause until user moves or clicks Solve & Type
     if (failedUrls.has(window.location.href)) {
       setStatus("Paused (check err)", "#facc15");
       return;
@@ -1532,16 +1741,6 @@ async function runAutoTick() {
     // Lightweight editor check (light: true -> NEVER scrolls editor up/down during idle/retry ticks!)
     const edState = await callBridge("READ_EDITOR", { light: true }, 3500);
     if (edState && edState.found) {
-      // Check ONLY this active coding problem's own sidebar-stripped statement (NEVER sidebar/panel!)
-      const activeProblemHead = (edState.problemText || "").slice(0, 500);
-      if (/koko eating bananas/i.test(activeProblemHead)) {
-        solvedUrls.add(window.location.href);
-        setStatus("Skipped 29.1.6", "#facc15");
-        setOutput("29.1.6 (Koko Eating Bananas) skip kiya — agle question par jaa raha hoon...");
-        await sleep(700);
-        await clickNextSlide();
-        return;
-      }
       await solveCurrentSlide({ autoSubmitAndNext: true });
       return;
     }

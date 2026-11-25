@@ -15,7 +15,7 @@
     return Math.floor(min + Math.random() * (max - min));
   }
 
-  const BLOCKED_QUESTION_PATTERNS = [/\b29\.1\.6\b/i, /koko eating bananas/i];
+  const BLOCKED_QUESTION_PATTERNS = [];
   function isBlockedQuestionText(str) {
     const t = (str || "").replace(/\s+/g, " ").trim();
     return BLOCKED_QUESTION_PATTERNS.some((re) => re.test(t));
@@ -248,9 +248,10 @@
   function extractProblemTextFromDoc(doc) {
     if (!doc || !doc.body) return "";
     const clone = doc.body.cloneNode(true);
+    // NEVER strip [class*="course-content"] — CodeTantra's left Problem Statement pane uses that class!
     clone
       .querySelectorAll(
-        '#ct-helper-panel, aside, nav, header, .navbar, [class*="sidebar" i], [class*="drawer" i], [class*="toc" i], [class*="menu" i], [class*="course-content" i], .cm-editor, .ace_editor, .monaco-editor, .CodeMirror, script, style, [aria-hidden="true"], .hidden, .d-none, [style*="display: none"], [style*="display:none"]'
+        '#ct-helper-panel, aside, nav, header, .navbar, [class*="sidebar" i], [class*="drawer" i], [class*="toc" i], .cm-editor, .ace_editor, .monaco-editor, .CodeMirror, script, style, [aria-hidden="true"], .hidden, .d-none, [style*="display: none"], [style*="display:none"]'
       )
       .forEach((el) => el.remove());
     // Strip any hidden CodeTantra TOC / search-modal container that wasn't caught by class names
@@ -264,7 +265,33 @@
         el.remove();
       }
     });
-    return (clone.innerText || "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 9000);
+    let text = (clone.innerText || "").replace(/\n{3,}/g, "\n\n").trim();
+
+    // Fallback: if class-based stripping removed too much, read directly from the visible left-half problem pane!
+    if (text.length < 80) {
+      try {
+        const win = doc.defaultView || window;
+        const maxLeftX = Math.floor((win.innerWidth || 1200) * 0.48);
+        const chunks = [];
+        const seen = new Set();
+        for (const el of Array.from(doc.querySelectorAll("h1, h2, h3, h4, p, li, pre, div"))) {
+          if (el.closest("#ct-helper-panel, header, nav, .navbar, .cm-editor, .ace_editor")) continue;
+          if (!isVisible(el)) continue;
+          const r = el.getBoundingClientRect();
+          if (r.top < 55 || r.left > maxLeftX || r.width < 120 || r.height < 14) continue;
+          if (el.children.length > 0 && el.tagName === "DIV") continue;
+          const t = (el.innerText || "").trim();
+          if (t && t.length < 1200 && !seen.has(t)) {
+            seen.add(t);
+            chunks.push(t);
+          }
+        }
+        const leftText = chunks.join("\n").trim();
+        if (leftText.length > text.length) text = leftText;
+      } catch {}
+    }
+
+    return text.slice(0, 9000);
   }
 
   // Auto-switch editor language dropdown (e.g. C -> Java / Python / C++) when user sets preferred language
@@ -278,8 +305,9 @@
     const rawTriggers = Array.from(doc.querySelectorAll("button, [role='button'], select, div, span")).filter((el) => {
       if (el.closest("#ct-helper-panel")) return false;
       if (!isVisible(el)) return false;
+      const win = doc.defaultView || window;
       const r = el.getBoundingClientRect();
-      if (r.top >= 170 || r.width < 22 || r.width >= 150 || r.height < 16 || r.height > 52) return false;
+      if (r.top >= 220 || r.left < Math.floor((win.innerWidth || 1200) * 0.42) || r.width < 22 || r.width >= 150 || r.height < 16 || r.height > 52) return false;
       const t = (el.innerText || el.textContent || "").replace(/[^a-z0-9+]/gi, "").toLowerCase();
       return t === "c" || t === "c++" || t === "java" || t === "python" || t === "python3";
     });
@@ -1004,7 +1032,7 @@
       const errLines = lines.filter(
         (l) =>
           !isTocNoise(l) &&
-          /(compilation error|error in .*line no:|error:|caused by:|exception|wrong name:|cannot be applied to|cannot find symbol|incompatible types|expected|traceback|syntaxerror|indentationerror|output mismatch|out of \d+ .*test case)/i.test(l)
+          /(compilation error|error in .*line no:|error:|caused by:|exception|wrong name:|cannot be applied to|cannot find symbol|incompatible types|expected|traceback|syntaxerror|indentationerror|output mismatch|reading more inputs|time limit exceeded|out of \d+ .*test case)/i.test(l)
       );
       for (const eline of errLines) {
         if (!seen.has(eline)) {
@@ -1040,10 +1068,36 @@
     return unique.join("\n---\n").slice(0, 4500);
   }
 
-  // ---------------- Auto-Dismiss CodeTantra AI Tutor Popups ----------------
+  // ---------------- Auto-Dismiss CodeTantra AI Tutor & Provider-Key Popups ----------------
   function dismissTutorPopupsInDoc(doc) {
     if (!doc || !doc.body) return false;
     let dismissed = false;
+
+    // 0. Auto-click "Cancel" on "AI Provider Key Required" / "Add your AI provider key..." modal
+    const modalBoxes = Array.from(doc.querySelectorAll("div, section, [role='dialog'], [role='alertdialog']")).filter((el) => {
+      if (el.closest("#ct-helper-panel") || el === doc.body) return false;
+      if (!isVisible(el)) return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 220 || rect.width > 760 || rect.height < 90 || rect.height > 420) return false;
+      const txt = normalizeText(el.innerText || "");
+      return (
+        txt.includes("ai provider key required") ||
+        txt.includes("add your ai provider key") ||
+        txt.includes("ai feedback on your code")
+      );
+    });
+    const innerModals = modalBoxes.filter((el) => !modalBoxes.some((other) => other !== el && el.contains(other)));
+    for (const modal of innerModals) {
+      const cancelBtn = Array.from(modal.querySelectorAll("button, a, [role='button'], span, div")).find((el) => {
+        if (!isVisible(el)) return false;
+        const t = normalizeText(el.innerText || el.textContent || "");
+        return t === "cancel" || t === "close" || t === "dismiss" || t === "no thanks";
+      });
+      if (cancelBtn) {
+        dispatchReliableClick(cancelBtn.closest("button, a, [role='button']") || cancelBtn);
+        dismissed = true;
+      }
+    }
 
     // 1. Dismiss "Want help fixing them?" -> click "No, I'll fix it myself" / "No, I'll try myself"
     const btns = Array.from(doc.querySelectorAll("button, a, [role='button']")).filter(
@@ -1534,9 +1588,6 @@
       language = (typeof mode === "string" ? mode : mode?.name) || language;
     }
 
-    if (!light) {
-      await expandSampleTestCasesInDoc(ed.doc);
-    }
     const problemText = extractProblemTextFromDoc(ed.doc);
     return { found: true, type: ed.type, code, language, lockedLines, problemText };
   }
@@ -1560,6 +1611,23 @@
       mode: e.start_line >= 1 && e.mode !== "replace_all" ? "replace_lines" : e.mode || (e.start_line >= 1 ? "replace_lines" : "replace_all")
     }));
 
+    const totalDocLines = view?.state?.doc?.lines || ed.contentEl?.querySelectorAll(".cm-line")?.length || 0;
+    function getEditableRangesHint() {
+      if (!totalDocLines) return "";
+      const ranges = [];
+      let rStart = -1;
+      for (let ln = 1; ln <= totalDocLines; ln++) {
+        if (!lockedSet.has(ln)) {
+          if (rStart === -1) rStart = ln;
+        } else if (rStart !== -1) {
+          ranges.push(rStart === ln - 1 ? `L${rStart}` : `L${rStart}-L${ln - 1}`);
+          rStart = -1;
+        }
+      }
+      if (rStart !== -1) ranges.push(rStart === totalDocLines ? `L${rStart}` : `L${rStart}-L${totalDocLines}`);
+      return ranges.length ? ` Allowed [EDITABLE] ranges: ${ranges.join(", ")}` : "";
+    }
+
     // HARD LOCKED-LINE PROTECTION: NEVER wipe a file that has pink [LOCKED] lines!
     const rawSorted = [...normalizedEdits].sort((a, b) => (a.start_line || 1) - (b.start_line || 1));
     const sortedEdits = [];
@@ -1567,7 +1635,7 @@
     for (const e of rawSorted) {
       if (e.mode === "replace_all") {
         if (lockedSet.size > 0) {
-          return { ok: false, error: "Blocked replace_all: file mein pink [LOCKED] lines hain!" };
+          return { ok: false, error: `Blocked replace_all: file mein pink [LOCKED] lines hain!${getEditableRangesHint()}` };
         }
         sortedEdits.length = 0;
         sortedEdits.push(e);
@@ -1590,7 +1658,7 @@
     }
 
     if (!sortedEdits.length) {
-      return { ok: false, error: "Koi safe editable block nahi mila (pink locked lines protected)." };
+      return { ok: false, error: `Koi safe editable block nahi mila (pink locked lines protected).${getEditableRangesHint()}` };
     }
 
     const totalChars = Math.max(1, sortedEdits.reduce((sum, e) => sum + (e.code || "").length, 0));
@@ -1633,12 +1701,44 @@
         }
 
         if (to > from) {
+          const beforeDelLen = view.state.doc.length;
           view.dispatch({ changes: { from, to, insert: "" }, selection: { anchor: from }, scrollIntoView: true });
           await sleep(randMs(70, 140));
+
+          // If CodeTantra's CM6 readOnly filter silently rejected the whole-range delete,
+          // clear line-by-line from bottom to top so any hidden read-only boundary line is skipped cleanly
+          // instead of dumping new code on top of old code!
+          if (view.state.doc.length === beforeDelLen && edit.mode === "replace_lines" && edit.start_line >= 1) {
+            const adjStart = Math.max(1, Math.min(edit.start_line + lineDelta, view.state.doc.lines));
+            const adjEnd = Math.max(adjStart, Math.min((edit.end_line || edit.start_line) + lineDelta, view.state.doc.lines));
+            let clearedAny = false;
+            let firstEditableFrom = -1;
+            for (let ln = adjEnd; ln >= adjStart; ln--) {
+              if (ln > view.state.doc.lines) continue;
+              const lineObj = view.state.doc.line(ln);
+              const delFrom = lineObj.from;
+              const delTo = ln < adjEnd && lineObj.to < view.state.doc.length ? lineObj.to + 1 : lineObj.to;
+              if (delTo <= delFrom) {
+                firstEditableFrom = delFrom;
+                continue;
+              }
+              const lenBefore = view.state.doc.length;
+              view.dispatch({ changes: { from: delFrom, to: delTo, insert: "" } });
+              if (view.state.doc.length < lenBefore) {
+                clearedAny = true;
+                firstEditableFrom = delFrom;
+              }
+            }
+            if (!clearedAny) {
+              return { ok: false, error: `CM6 readOnly filter ne L${adjStart}-L${adjEnd} delete nahi hone diya (locked boundary).` };
+            }
+            if (firstEditableFrom >= 0) from = firstEditableFrom;
+            await sleep(randMs(70, 120));
+          }
         }
 
         const text = (edit.code || "").replace(/\r\n/g, "\n");
-        let cursor = from;
+        let cursor = Math.max(0, Math.min(from, view.state.doc.length));
 
         for (let i = 0; i < text.length; i += chunkSize) {
           if (stopTypingFlag || sessionId !== activeTypingSessionId) {
@@ -1646,12 +1746,14 @@
           }
           const piece = text.slice(i, i + chunkSize);
           const safePos = Math.max(0, Math.min(cursor, view.state.doc.length));
+          const prevDocLen = view.state.doc.length;
           view.dispatch({
             changes: { from: safePos, to: safePos, insert: piece },
             selection: { anchor: safePos + piece.length },
             scrollIntoView: true
           });
-          cursor = safePos + piece.length;
+          const actualInserted = Math.max(0, view.state.doc.length - prevDocLen);
+          cursor = safePos + actualInserted;
           doneChars += piece.length;
           if (doneChars % 12 < chunkSize || doneChars >= totalChars) {
             emitProgressToTop(Math.min(100, Math.round((doneChars / totalChars) * 100)), doneChars, totalChars);
@@ -1852,21 +1954,25 @@
 
       if (type === "EXPAND_PROBLEM_PANELS") {
         const localExpanded = await expandSampleTestCasesInDoc(document);
-        const localText = localExpanded ? extractProblemTextFromDoc(document) : "";
-        if (localExpanded && localText.length > 80) {
+        const localText = extractProblemTextFromDoc(document);
+        const looksLikeProblem = (t) => /(input format|output format|sample test cases|fill the missing code|constraints|write a (?:program|function|code)|you are given)/i.test(t || "");
+        if (localText.length > 120 && looksLikeProblem(localText)) {
           window.postMessage(
-            { source: "CT_BRIDGE", id, type: "EXPAND_PROBLEM_PANELS_RES", payload: { expanded: true, problemText: localText } },
+            { source: "CT_BRIDGE", id, type: "EXPAND_PROBLEM_PANELS_RES", payload: { expanded: localExpanded, problemText: localText } },
             "*"
           );
           return;
         }
-        const remote = await askChildFrames(id, "EXPAND_PROBLEM_PANELS", {}, 4000);
+        const remote = await askChildFrames(id, "EXPAND_PROBLEM_PANELS", {}, 4500);
+        const remoteText = remote?.problemText || "";
+        const bestText =
+          looksLikeProblem(remoteText) || remoteText.length > localText.length ? remoteText : localText;
         window.postMessage(
           {
             source: "CT_BRIDGE",
             id,
             type: "EXPAND_PROBLEM_PANELS_RES",
-            payload: remote || { expanded: localExpanded, problemText: localText }
+            payload: { expanded: Boolean(localExpanded || remote?.expanded), problemText: bestText }
           },
           "*"
         );
@@ -1890,7 +1996,7 @@
           window.postMessage({ source: "CT_BRIDGE", id, type: "READ_EDITOR_RES", payload: local }, "*");
           return;
         }
-        const remote = await askChildFrames(id, "READ_EDITOR", payload || {}, 4000);
+        const remote = await askChildFrames(id, "READ_EDITOR", payload || {}, 9000);
         window.postMessage(
           {
             source: "CT_BRIDGE",
@@ -2046,7 +2152,7 @@
           window.postMessage({ source: "CT_BRIDGE", id, type: "EVAL_TESTS_RES", payload: evalRes }, "*");
           return;
         }
-        const remote = await askChildFrames(id, "EVAL_TESTS", {}, 3500);
+        const remote = await askChildFrames(id, "EVAL_TESTS", {}, 6500);
         window.postMessage(
           { source: "CT_BRIDGE", id, type: "EVAL_TESTS_RES", payload: remote || (await evaluateTestResultsInDoc(document)) },
           "*"
@@ -2067,9 +2173,11 @@
 
       if (type === "EXPAND_PROBLEM_PANELS") {
         const localExpanded = await expandSampleTestCasesInDoc(document);
-        if (localExpanded) {
+        const localText = extractProblemTextFromDoc(document);
+        const hasProblem = /(input format|output format|sample test cases|fill the missing code|constraints|write a (?:program|function|code)|you are given)/i.test(localText);
+        if (localExpanded || (hasProblem && localText.length > 80)) {
           window.top.postMessage(
-            { source: "CT_FRAME_TO_TOP", id, type, payload: { expanded: true, problemText: extractProblemTextFromDoc(document) } },
+            { source: "CT_FRAME_TO_TOP", id, type, payload: { expanded: localExpanded, problemText: localText } },
             "*"
           );
         } else {

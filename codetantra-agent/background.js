@@ -151,30 +151,38 @@ async function submitPromptDirect(promptText) {
 
   const extractBest = (node) => {
     if (!node) return "";
+    const fullText = (node.innerText || node.textContent || "").trim();
     const blocks = Array.from(node.querySelectorAll("pre code, code-block code, pre"));
-    // Prefer a JSON block containing our exact schema keys first
+    // Priority 1: Tagged <<<SLOT N>>> code block (zero JSON-escaping bugs!)
     for (let i = blocks.length - 1; i >= 0; i--) {
       const t = (blocks[i].innerText || blocks[i].textContent || "").trim();
-      if (t.includes("{") && t.includes("}") && (t.includes('"edits"') || t.includes('"answers"') || t.includes('"verified"'))) {
+      if (/<<<SLOT\s*\d+>>>/i.test(t)) return t;
+    }
+    if (/<<<SLOT\s*\d+>>>/i.test(fullText)) return fullText;
+    // Priority 2: JSON block containing our schema keys
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const t = (blocks[i].innerText || blocks[i].textContent || "").trim();
+      if (t.includes("{") && t.includes("}") && (t.includes('"slots"') || t.includes('"edits"') || t.includes('"answers"') || t.includes('"verified"'))) {
         return t;
       }
     }
-    for (let i = blocks.length - 1; i >= 0; i--) {
-      const t = (blocks[i].innerText || blocks[i].textContent || "").trim();
-      if (t.includes("{") && t.includes("}")) return t;
+    // Priority 3: Largest code block if Gemini replied with plain fenced code
+    if (blocks.length) {
+      const bestBlock = blocks.map((b) => (b.innerText || b.textContent || "").trim()).sort((a, b) => b.length - a.length)[0];
+      if (bestBlock && bestBlock.length > 20) return "```\n" + bestBlock + "\n```";
     }
-    return (node.innerText || node.textContent || "").trim();
+    return fullText;
   };
 
   const getJsonCount = () =>
     qDeep("pre code, code-block code, pre").filter((el) => {
       const t = (el.innerText || el.textContent || "").trim();
-      return t.includes("{") && t.includes("}") && (t.includes('"edits"') || t.includes('"answers"') || t.includes('"verified"'));
+      return /<<<SLOT\s*\d+>>>/i.test(t) || (t.includes("{") && t.includes("}") && (t.includes('"slots"') || t.includes('"edits"') || t.includes('"answers"') || t.includes('"verified"')));
     }).length;
 
-  // Keep chat fast & clean: if current Gemini chat already has >= 10 replies, click 'New chat' once to prevent context bloat
+  // Keep chat fast & clean: if current Gemini chat already has >= 4 replies, click 'New chat' once so old questions never poison new answers
   const initialNodes = getRespNodes();
-  if (initialNodes.length >= 10) {
+  if (initialNodes.length >= 4) {
     const newChatBtn = qDeep('a, button, [role="button"]').find((el) => {
       if (!isVis(el)) return false;
       const t = (el.innerText || el.getAttribute("aria-label") || "").trim().toLowerCase();
@@ -389,37 +397,43 @@ function pollResponseDirect(beforeCount, beforeLastText, beforeJsonCount) {
 
   const extractBest = (node) => {
     if (!node) return "";
+    const fullText = (node.innerText || node.textContent || "").trim();
     const blocks = Array.from(node.querySelectorAll("pre code, code-block code, pre"));
     for (let i = blocks.length - 1; i >= 0; i--) {
       const t = (blocks[i].innerText || blocks[i].textContent || "").trim();
-      if (t.includes("{") && t.includes("}") && (t.includes('"edits"') || t.includes('"answers"') || t.includes('"verified"'))) {
+      if (/<<<SLOT\s*\d+>>>/i.test(t)) return t;
+    }
+    if (/<<<SLOT\s*\d+>>>/i.test(fullText)) return fullText;
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const t = (blocks[i].innerText || blocks[i].textContent || "").trim();
+      if (t.includes("{") && t.includes("}") && (t.includes('"slots"') || t.includes('"edits"') || t.includes('"answers"') || t.includes('"verified"'))) {
         return t;
       }
     }
-    for (let i = blocks.length - 1; i >= 0; i--) {
-      const t = (blocks[i].innerText || blocks[i].textContent || "").trim();
-      if (t.includes("{") && t.includes("}")) return t;
+    if (blocks.length) {
+      const bestBlock = blocks.map((b) => (b.innerText || b.textContent || "").trim()).sort((a, b) => b.length - a.length)[0];
+      if (bestBlock && bestBlock.length > 20) return "```\n" + bestBlock + "\n```";
     }
-    return (node.innerText || node.textContent || "").trim();
+    return fullText;
   };
 
   const hasNewNode = nodes.length > beforeCount;
   const latestNode = nodes.length > 0 ? nodes[nodes.length - 1] : null;
   const latestText = latestNode ? extractBest(latestNode) : "";
   if (hasNewNode || (latestText && latestText !== beforeLastText)) {
-    return { ok: true, hasNew: true, generating, text: latestText };
+    return { ok: true, hasNew: true, isNewNode: hasNewNode, generating, text: latestText };
   }
 
   const jsonBlocks = qDeep("pre code, code-block code, pre").filter((el) => {
     const t = (el.innerText || el.textContent || "").trim();
-    return t.includes("{") && t.includes("}") && (t.includes('"edits"') || t.includes('"answers"') || t.includes('"verified"'));
+    return /<<<SLOT\s*\d+>>>/i.test(t) || (t.includes("{") && t.includes("}") && (t.includes('"slots"') || t.includes('"edits"') || t.includes('"answers"') || t.includes('"verified"')));
   });
   if (jsonBlocks.length > beforeJsonCount) {
     const txt = (jsonBlocks[jsonBlocks.length - 1].innerText || jsonBlocks[jsonBlocks.length - 1].textContent || "").trim();
-    return { ok: true, hasNew: true, generating, text: txt };
+    return { ok: true, hasNew: true, isNewNode: true, generating, text: txt };
   }
 
-  return { ok: true, hasNew: false, generating, text: "" };
+  return { ok: true, hasNew: false, isNewNode: false, generating, text: "" };
 }
 
 async function askGeminiWebTab(prompt, callerTabId) {
@@ -472,8 +486,11 @@ async function askGeminiWebTab(prompt, callerTabId) {
 
     const { beforeCount = 0, beforeLastText = "", beforeJsonCount = 0 } = submitRes;
     let lastSeen = "";
-    let stableTicks = 0;
+    let unchangedTicks = 0;
     const startTs = Date.now();
+
+    // Give Gemini 1.5s to register the new user turn before polling so it never reads a stale previous reply
+    await sleep(1500);
 
     while (Date.now() - startTs < 120000) {
       await sleep(700);
@@ -502,16 +519,25 @@ async function askGeminiWebTab(prompt, callerTabId) {
       }
 
       if (!poll || !poll.ok) continue;
-      if (poll.hasNew && poll.text) {
-        if (poll.text === lastSeen && !poll.generating) {
-          stableTicks++;
-          if (stableTicks >= 2) {
+      const curText = (poll.text || "").trim();
+      const prevText = (beforeLastText || "").trim();
+      if (poll.hasNew && curText && (poll.isNewNode || curText !== prevText)) {
+        const hasFullSlot = /<<<SLOT\s*\d+>>>/i.test(curText) && /<<<END_SLOT\s*\d+>>>/i.test(curText);
+        if (hasFullSlot) {
+          // Closing <<<END_SLOT N>>> tag is already written — wait 1 short tick and return IMMEDIATELY (zero 60s+ hangs!)
+          await sleep(600);
+          notifyProgress(callerTabId, "4/4 Answer mil gaya ✓ — CodeTantra par wapas aa raha hoon...");
+          return { ok: true, model: "Gemini Web (Free)", rawText: curText };
+        }
+        if (curText === lastSeen) {
+          unchangedTicks++;
+          if ((!poll.generating && unchangedTicks >= 2) || unchangedTicks >= 5) {
             notifyProgress(callerTabId, "4/4 Answer mil gaya ✓ — CodeTantra par wapas aa raha hoon...");
-            return { ok: true, model: "Gemini Web (Free)", rawText: poll.text };
+            return { ok: true, model: "Gemini Web (Free)", rawText: curText };
           }
         } else {
-          lastSeen = poll.text;
-          stableTicks = 0;
+          lastSeen = curText;
+          unchangedTicks = 0;
         }
       }
     }

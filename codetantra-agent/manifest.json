@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CodeTantra AI Agent",
-  "version": "10.2",
+  "version": "10.10",
   "description": "CodeTantra AI Agent v10.0 Final: Zero-API-Key Gemini Web + API Key toggle, clean Settings drawer with 1s-60s Typing Speed Grid, surgical compiler/test-case diff fixes, and MCQ auto-solver",
   "permissions": ["activeTab", "tabs", "scripting"],
   "host_permissions": [
