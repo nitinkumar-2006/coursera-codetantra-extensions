@@ -250,7 +250,7 @@
     const clone = doc.body.cloneNode(true);
     clone
       .querySelectorAll(
-        '#ct-helper-panel, .cm-editor, .ace_editor, .monaco-editor, .CodeMirror, script, style, [aria-hidden="true"], .hidden, .d-none, [style*="display: none"], [style*="display:none"]'
+        '#ct-helper-panel, aside, nav, header, .navbar, [class*="sidebar" i], [class*="drawer" i], [class*="toc" i], .cm-editor, .ace_editor, .monaco-editor, .CodeMirror, script, style, [aria-hidden="true"], .hidden, .d-none, [style*="display: none"], [style*="display:none"]'
       )
       .forEach((el) => el.remove());
     return (clone.innerText || "").replace(/\n{3,}/g, "\n\n").trim().slice(0, 15000);
@@ -264,36 +264,54 @@
     const targetLabel = langLabels[want] || want;
 
     // Find top-right editor language dropdown button (shows C / C++ / Java / Python near Submit)
-    const btns = Array.from(doc.querySelectorAll("button, [role='button'], select")).filter(
-      (el) => !el.closest("#ct-helper-panel") && isVisible(el)
-    );
-    const langTrigger = btns.find((el) => {
-      const t = (el.innerText || el.textContent || "").replace(/[^a-z0-9+]/gi, "").toLowerCase();
+    const rawTriggers = Array.from(doc.querySelectorAll("button, [role='button'], select, div, span")).filter((el) => {
+      if (el.closest("#ct-helper-panel")) return false;
+      if (!isVisible(el)) return false;
       const r = el.getBoundingClientRect();
-      return (t === "c" || t === "c++" || t === "java" || t === "python" || t === "python3") && r.top < 170 && r.width < 150;
+      if (r.top >= 170 || r.width < 22 || r.width >= 150 || r.height < 16 || r.height > 52) return false;
+      const t = (el.innerText || el.textContent || "").replace(/[^a-z0-9+]/gi, "").toLowerCase();
+      return t === "c" || t === "c++" || t === "java" || t === "python" || t === "python3";
     });
-    if (!langTrigger) return { ok: false };
+    const triggers = rawTriggers.filter((el) => !rawTriggers.some((other) => other !== el && el.contains(other)));
+    const langTriggerEl = triggers[0];
+    if (!langTriggerEl) return { ok: false };
+    const langTrigger = langTriggerEl.closest("button, [role='button']") || langTriggerEl;
 
     const curText = (langTrigger.innerText || langTrigger.textContent || "").replace(/[^a-z0-9+]/gi, "").toLowerCase();
     if (curText === targetLabel || (want === "python" && curText.startsWith("python"))) {
       return { ok: true, already: true };
     }
 
-    langTrigger.click();
-    await sleep(350);
+    const triggerRect = langTrigger.getBoundingClientRect();
+    dispatchReliableClick(langTrigger);
+    await sleep(400);
 
-    const menuItems = Array.from(doc.querySelectorAll("button, li, a, div, span, [role='menuitem'], [role='option']")).filter(
-      (el) => !el.closest("#ct-helper-panel") && el !== langTrigger && isVisible(el)
+    // Pick ONLY actual dropdown menu options BELOW the trigger (never langTrigger's own child span!)
+    const rawMenuItems = Array.from(doc.querySelectorAll("button, li, a, div, span, [role='menuitem'], [role='option']")).filter(
+      (el) => {
+        if (el.closest("#ct-helper-panel")) return false;
+        if (el === langTrigger || langTrigger.contains(el)) return false;
+        if (!isVisible(el)) return false;
+        const r = el.getBoundingClientRect();
+        if (r.top < triggerRect.bottom - 5 || r.height < 16 || r.height > 60 || r.width > 240) return false;
+        const t = (el.innerText || el.textContent || "").replace(/[^a-z0-9+]/gi, "").toLowerCase();
+        return t === targetLabel || (want === "python" && t.startsWith("python"));
+      }
     );
-    const pick = menuItems.find((el) => {
-      const t = normalizeText(el.innerText || el.textContent || "");
-      return (t === targetLabel || (want === "python" && t.startsWith("python"))) && el.getBoundingClientRect().height < 60;
-    });
+    const pick = rawMenuItems.find((el) => !rawMenuItems.some((other) => other !== el && el.contains(other))) || rawMenuItems[0];
     if (pick) {
-      pick.click();
-      await sleep(950);
+      const host = pick.closest("button, li, [role='menuitem'], [role='option']") || pick;
+      dispatchReliableClick(host);
+      if (host !== pick) dispatchReliableClick(pick);
+      await sleep(1100);
+      try {
+        doc.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      } catch {}
       return { ok: true, switchedTo: targetLabel };
     }
+    try {
+      doc.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    } catch {}
     return { ok: false };
   }
 
@@ -605,12 +623,12 @@
     if (doc.querySelector('.cm-editor, .cm-content, .ace_editor, .monaco-editor, .CodeMirror, input[type="radio"], input[type="checkbox"]')) {
       return true;
     }
-    const btns = Array.from(doc.querySelectorAll("button, a, [role='button'], input[type='button'], input[type='submit']")).filter(
-      (el) => !el.closest("#ct-helper-panel") && isVisible(el)
+    const btns = Array.from(doc.querySelectorAll("button, a, [role='button'], span, div, input[type='button'], input[type='submit']")).filter(
+      (el) => !el.closest("#ct-helper-panel") && isVisible(el) && el.getBoundingClientRect().height < 64 && el.getBoundingClientRect().width < 220
     );
     const hasCodingOrQuizBtn = btns.some((el) => {
       const t = normalizeText(el.innerText || el.value || el.textContent || "");
-      return t === "submit" || t === "reset" || t === "submit code" || t === "test cases" || t === "terminal" || t === "compile & run";
+      return t === "submit" || t === "reset" || t === "submit code" || t === "test cases" || t === "terminal" || t === "compile & run" || t === "explorer" || t === "debugger";
     });
     if (hasCodingOrQuizBtn) return true;
 
@@ -619,8 +637,12 @@
       bodyTxt.includes("setting up environment") ||
       bodyTxt.includes("loading environment") ||
       bodyTxt.includes("sample test cases") ||
+      bodyTxt.includes("sample input") ||
+      bodyTxt.includes("sample output") ||
       bodyTxt.includes("shown test case") ||
       bodyTxt.includes("hidden test case") ||
+      bodyTxt.includes("write a code") ||
+      bodyTxt.includes("write a program") ||
       (bodyTxt.includes("input format") && bodyTxt.includes("output format"))
     ) {
       return true;
@@ -628,8 +650,151 @@
     return false;
   }
 
+  // Auto-expand collapsed failed 'Test case 1' / 'Test case 2' accordions on the right-side test panel
+  async function expandFailedTestCasesInDoc(doc) {
+    if (!doc || !doc.body) return;
+    try {
+      const win = doc.defaultView || window;
+      const minRightX = Math.floor((win.innerWidth || 1200) * 0.35);
+      const hasVisibleDiff = Array.from(doc.querySelectorAll("th, div, span, p")).some((el) => {
+        if (el.closest("#ct-helper-panel") || !isVisible(el)) return false;
+        const r = el.getBoundingClientRect();
+        if (r.left < minRightX) return false;
+        const t = normalizeText(el.innerText || el.textContent || "");
+        return t === "expected output" || t === "actual output";
+      });
+      if (hasVisibleDiff) return;
+
+      const rawHeaders = Array.from(doc.querySelectorAll("button, [role='button'], div, span, h3, h4, h5")).filter((el) => {
+        if (el.closest("#ct-helper-panel, .cm-editor, .ace_editor") || !isVisible(el)) return false;
+        const r = el.getBoundingClientRect();
+        if (r.left < minRightX || r.height > 70 || r.width < 60) return false;
+        const t = normalizeText(el.innerText || el.textContent || "");
+        return /^test case\s*\d+\b/i.test(t) && t.length < 40;
+      });
+      const headers = rawHeaders.filter((el) => !rawHeaders.some((other) => other !== el && el.contains(other)));
+      for (const hdr of headers.slice(0, 2)) {
+        const clickable = hdr.closest("button, [role='button']") || hdr.parentElement || hdr;
+        dispatchReliableClick(clickable);
+        await sleep(320);
+        const openedNow = Array.from(doc.querySelectorAll("th, div, span, p")).some((el) => {
+          if (el.closest("#ct-helper-panel") || !isVisible(el)) return false;
+          const r = el.getBoundingClientRect();
+          return r.left >= minRightX && normalizeText(el.innerText || "") === "expected output";
+        });
+        if (openedNow) break;
+      }
+    } catch {}
+  }
+
+  // Parse CodeTantra's side-by-side 'Expected output' vs 'Actual output' diff and return ONLY mismatched rows!
+  function extractExpectedVsActualDiffs(doc) {
+    if (!doc || !doc.body) return "";
+    const win = doc.defaultView || window;
+    const minRightX = Math.floor((win.innerWidth || 1200) * 0.35);
+    const cleanCell = (str) =>
+      (str || "")
+        .replace(/\u00B7/g, " ")
+        .replace(/\u21B5/g, "")
+        .replace(/\u00A0/g, " ")
+        .replace(/\r\n/g, "\n")
+        .replace(/\s+\n/g, "\n")
+        .trim();
+
+    const diffLines = [];
+    const pushDiffRows = (rows) => {
+      let lastEmittedIdx = -1;
+      let diffCount = 0;
+      for (let i = 0; i < rows.length; i++) {
+        const { exp, act } = rows[i];
+        if (exp === act) continue;
+        diffCount++;
+        if (diffCount > 16) {
+          diffLines.push(`... (+more mismatched rows omitted)`);
+          break;
+        }
+        // Include 1 preceding matching row for context so Gemini knows exact menu/step location
+        if (i > 0 && lastEmittedIdx < i - 1) {
+          diffLines.push(`Context Row ${i}: ${rows[i - 1].exp}`);
+        }
+        diffLines.push(`MISMATCH Row ${i + 1}:\n  EXPECTED: ${JSON.stringify(exp)}\n  ACTUAL:   ${JSON.stringify(act)}`);
+        lastEmittedIdx = i;
+      }
+    };
+
+    // Strategy 1: Standard <table> containing Expected output / Actual output
+    try {
+      const tables = Array.from(doc.querySelectorAll("table")).filter((tb) => {
+        if (tb.closest("#ct-helper-panel") || !isVisible(tb)) return false;
+        const r = tb.getBoundingClientRect();
+        if (r.left < minRightX) return false;
+        const txt = normalizeText(tb.innerText || "");
+        return txt.includes("expected output") && txt.includes("actual output");
+      });
+      for (const tb of tables) {
+        const trs = Array.from(tb.querySelectorAll("tr")).filter((tr) => isVisible(tr));
+        const parsed = [];
+        for (const tr of trs) {
+          const cells = Array.from(tr.querySelectorAll("td, th"));
+          if (cells.length < 2) continue;
+          const c0 = cleanCell(cells[0].innerText || cells[0].textContent || "");
+          const c1 = cleanCell(cells[1].innerText || cells[1].textContent || "");
+          if (normalizeText(c0) === "expected output" || normalizeText(c1) === "actual output") continue;
+          if (cells.length >= 3 && /^\d+$/.test(c0)) {
+            parsed.push({ exp: c1, act: cleanCell(cells[2].innerText || cells[2].textContent || "") });
+          } else {
+            parsed.push({ exp: c0, act: c1 });
+          }
+        }
+        if (parsed.length) pushDiffRows(parsed);
+      }
+    } catch {}
+
+    // Strategy 2: Flex/Grid 2-column div layout under 'Expected output' | 'Actual output'
+    if (!diffLines.length) {
+      try {
+        const expHeaders = Array.from(doc.querySelectorAll("div, span, th, p")).filter((el) => {
+          if (el.closest("#ct-helper-panel") || !isVisible(el)) return false;
+          const r = el.getBoundingClientRect();
+          return r.left >= minRightX && normalizeText(el.innerText || "") === "expected output";
+        });
+        for (const expHdr of expHeaders) {
+          const expX = expHdr.getBoundingClientRect().left;
+          let box = expHdr.parentElement;
+          let foundBox = null;
+          for (let up = 0; up < 5 && box && box !== doc.body; up++) {
+            const txt = normalizeText(box.innerText || "");
+            if (txt.includes("expected output") && txt.includes("actual output") && box.children.length >= 2) {
+              foundBox = box;
+              if (box.querySelectorAll("div").length >= 6) break;
+            }
+            box = box.parentElement;
+          }
+          if (!foundBox) continue;
+          const rowEls = Array.from(foundBox.querySelectorAll("div, li")).filter((el) => {
+            if (!isVisible(el) || el.children.length !== 2) return false;
+            const r0 = el.children[0].getBoundingClientRect();
+            const r1 = el.children[1].getBoundingClientRect();
+            return Math.abs(r0.top - r1.top) < 18 && r1.left > r0.left + 80 && Math.abs(r0.left - expX) < 60;
+          });
+          const parsed = [];
+          for (const row of rowEls) {
+            const exp = cleanCell(row.children[0].innerText || row.children[0].textContent || "");
+            const act = cleanCell(row.children[1].innerText || row.children[1].textContent || "");
+            if (normalizeText(exp) === "expected output" && normalizeText(act) === "actual output") continue;
+            if (!exp && !act) continue;
+            parsed.push({ exp, act });
+          }
+          if (parsed.length) pushDiffRows(parsed);
+        }
+      } catch {}
+    }
+
+    return diffLines.length ? `EXACT EXPECTED vs ACTUAL MISMATCHES:\n${diffLines.join("\n")}` : "";
+  }
+
   // Exact CodeTantra Test-Case Pass / Fail Evaluation Parser!
-  function evaluateTestResultsInDoc(doc) {
+  async function evaluateTestResultsInDoc(doc) {
     if (!doc || !doc.body) return { status: "unknown", summary: "" };
     const text = (doc.body.innerText || "").replace(/\s+/g, " ");
 
@@ -646,6 +811,7 @@
       if (shownOk && hiddenOk) {
         return { status: "passed", summary };
       }
+      await expandFailedTestCasesInDoc(doc);
       return { status: "failed", summary: `${summary}\n${readFailureSnippetFromDoc(doc)}` };
     }
 
@@ -655,6 +821,7 @@
       if (totalNum > 0 && passedNum === totalNum) {
         return { status: "passed", summary: genericMatch[0] };
       }
+      await expandFailedTestCasesInDoc(doc);
       return { status: "failed", summary: `${genericMatch[0]}\n${readFailureSnippetFromDoc(doc)}` };
     }
 
@@ -679,35 +846,25 @@
 
   function readFailureSnippetFromDoc(doc) {
     if (!doc) return "";
-    const candidates = Array.from(
-      doc.querySelectorAll(
-        '[class*="output" i], [class*="result" i], [class*="console" i], [class*="error" i], [class*="test" i], [class*="traceback" i], [class*="text-red" i], [class*="danger" i], [class*="mono" i], [class*="alert" i], code, table, pre'
-      )
-    ).filter(
-      (el) =>
-        !el.closest("#ct-helper-panel") &&
-        !el.closest(".cm-editor") &&
-        !el.closest(".ace_editor") &&
-        isVisible(el)
-    );
-
+    const win = doc.defaultView || window;
+    const minRightX = Math.floor((win.innerWidth || 1200) * 0.35);
     const unique = [];
     const seen = new Set();
-    for (const el of candidates) {
-      const t = (el.innerText || "").trim();
-      if (t.length > 0 && t.length < 2800 && !seen.has(t)) {
-        seen.add(t);
-        unique.push(t);
-      }
+
+    // PRIORITY 1: Exact mismatched Expected vs Actual diff rows at the VERY TOP (never truncated by identical prompt rows!)
+    const smartDiff = extractExpectedVsActualDiffs(doc);
+    if (smartDiff) {
+      seen.add(smartDiff);
+      unique.push(smartDiff);
     }
 
-    // Also extract explicit Error / Caused by / Expected vs Actual lines directly from visible body text
+    // PRIORITY 2: Explicit compiler / runtime error lines from visible page text
     try {
       const clone = doc.body.cloneNode(true);
       clone.querySelectorAll("#ct-helper-panel, .cm-editor, .ace_editor, script, style").forEach((el) => el.remove());
       const lines = (clone.innerText || "").split("\n").map((l) => l.trim()).filter(Boolean);
       const errLines = lines.filter((l) =>
-        /(error:|caused by:|exception|wrong name:|traceback|syntaxerror|indentationerror|output mismatch|out of \d+ .*test case)/i.test(l)
+        /(error:|caused by:|exception|wrong name:|traceback|syntaxerror|indentationerror|cannot find symbol|incompatible types|output mismatch|out of \d+ .*test case)/i.test(l)
       );
       for (const eline of errLines) {
         if (!seen.has(eline)) {
@@ -716,6 +873,25 @@
         }
       }
     } catch {}
+
+    // PRIORITY 3: Right-side test/output containers ONLY (never scrape left-side 'Sample Test Cases' accordion!)
+    const candidates = Array.from(
+      doc.querySelectorAll(
+        '[class*="output" i], [class*="result" i], [class*="console" i], [class*="error" i], [class*="test" i], [class*="traceback" i], [class*="text-red" i], [class*="danger" i], [class*="mono" i], [class*="alert" i], pre'
+      )
+    ).filter((el) => {
+      if (el.closest("#ct-helper-panel, .cm-editor, .ace_editor") || !isVisible(el)) return false;
+      const r = el.getBoundingClientRect();
+      return r.left >= minRightX;
+    });
+
+    for (const el of candidates) {
+      const t = (el.innerText || "").trim();
+      if (t.length > 0 && t.length < 2200 && !/^sample test cases/i.test(t) && !seen.has(t)) {
+        seen.add(t);
+        unique.push(t);
+      }
+    }
 
     return unique.join("\n---\n").slice(0, 4500);
   }
@@ -1031,16 +1207,46 @@
     el.click();
   }
 
+  function clickCodeSubmitInDoc(doc) {
+    if (!doc) return false;
+    const candidates = Array.from(
+      doc.querySelectorAll("button, a, [role='button'], span, div, input[type='button'], input[type='submit']")
+    ).filter((el) => {
+      if (el.closest("#ct-helper-panel")) return false;
+      if (el.disabled || el.getAttribute("aria-disabled") === "true") return false;
+      if (!isVisible(el)) return false;
+      const r = el.getBoundingClientRect();
+      if (r.width < 36 || r.width > 200 || r.height < 18 || r.height > 62) return false;
+      const t = normalizeText(el.innerText || el.value || el.textContent || "");
+      return t === "submit" || t === "submit code" || t === "compile & run";
+    });
+    const innermost = candidates.filter((el) => !candidates.some((other) => other !== el && el.contains(other)));
+    // Prioritize the top-right green '▶ Submit' button (r.top < 220) over the bottom bar!
+    const topSubmit = innermost.find((el) => el.getBoundingClientRect().top < 220);
+    const pick = topSubmit || innermost[0];
+    if (!pick) return false;
+    const host = pick.closest("button, a, [role='button']") || pick;
+    dispatchReliableClick(host);
+    if (host !== pick) dispatchReliableClick(pick);
+    return true;
+  }
+
   function clickButtonInDoc(doc, targets, { exactFirst = true } = {}) {
     if (!doc) return false;
 
     const isClickableBtn = (el) => {
-      if (el.closest("#ct-helper-panel")) return false;
+      if (
+        el.closest(
+          '#ct-helper-panel, header, nav, aside, .navbar, [class*="sidebar" i], [class*="drawer" i], [class*="toc" i]'
+        )
+      ) {
+        return false;
+      }
       if (el.disabled || el.getAttribute("aria-disabled") === "true") return false;
       return isVisible(el);
     };
 
-    // 1. Standard buttons/links first
+    // 1. Standard buttons/links first (NEVER sidebar/nav links!)
     const els = Array.from(
       doc.querySelectorAll("button, a, [role='button'], input[type='button'], input[type='submit']")
     ).filter(isClickableBtn);
@@ -1056,13 +1262,18 @@
       }
     }
 
-    const partial = els.find((el) => {
-      const txt = normalizeText(el.innerText || el.value || el.textContent || "");
-      return txt && targets.some((t) => txt.includes(t));
-    });
-    if (partial) {
-      dispatchReliableClick(partial);
-      return true;
+    // NEVER do substring .includes() for short words like "ok", "yes", "next" (prevents "ok" matching "Koko Eating Bananas"!)
+    const longTargets = targets.filter((t) => t.length >= 5);
+    if (longTargets.length) {
+      const partial = els.find((el) => {
+        if (el.tagName === "A" && (el.getAttribute("href") || "").includes("#/contents")) return false;
+        const txt = normalizeText(el.innerText || el.value || el.textContent || "");
+        return txt && txt.length < 40 && longTargets.some((t) => txt.includes(t));
+      });
+      if (partial) {
+        dispatchReliableClick(partial);
+        return true;
+      }
     }
 
     // 2. Fallback for CodeTantra bottom bar pills (< Prev, Reset, Submit, Next >) which may be <span> / <div> elements!
@@ -1235,7 +1446,11 @@
     }
 
     const totalChars = Math.max(1, sortedEdits.reduce((sum, e) => sum + (e.code || "").length, 0));
-    const baseCharMs = Math.max(68, Math.min(145, Math.floor(targetTotalMs / totalChars)));
+    // Fast ~10s natural typing: dynamically scale chunk size so even 1,500-char DSA code finishes in ~9-11s!
+    const chunkSize = totalChars > 1000 ? 5 : totalChars > 500 ? 3 : totalChars > 220 ? 2 : 1;
+    const totalSteps = Math.max(1, Math.ceil(totalChars / chunkSize));
+    const baseStepMs = Math.max(5, Math.min(32, Math.floor((targetTotalMs * 0.85) / totalSteps)));
+    const baseCharMs = baseStepMs;
     let doneChars = 0;
 
     if (view && view.state && typeof view.dispatch === "function") {
@@ -1262,39 +1477,37 @@
 
         if (to > from) {
           view.dispatch({ changes: { from, to, insert: "" }, selection: { anchor: from }, scrollIntoView: true });
-          await sleep(randMs(260, 520));
+          await sleep(randMs(70, 140));
         }
 
         const text = (edit.code || "").replace(/\r\n/g, "\n");
         let cursor = from;
 
-        for (let i = 0; i < text.length; i++) {
+        for (let i = 0; i < text.length; i += chunkSize) {
           if (stopTypingFlag || sessionId !== activeTypingSessionId) {
             return { ok: false, error: "Typing stopped by user." };
           }
-          const ch = text[i];
+          const piece = text.slice(i, i + chunkSize);
           const safePos = Math.max(0, Math.min(cursor, view.state.doc.length));
           view.dispatch({
-            changes: { from: safePos, to: safePos, insert: ch },
-            selection: { anchor: safePos + ch.length },
+            changes: { from: safePos, to: safePos, insert: piece },
+            selection: { anchor: safePos + piece.length },
             scrollIntoView: true
           });
-          cursor = safePos + ch.length;
-          doneChars++;
-          if (doneChars % 3 === 0 || doneChars === totalChars) {
+          cursor = safePos + piece.length;
+          doneChars += piece.length;
+          if (doneChars % 12 < chunkSize || doneChars >= totalChars) {
             emitProgressToTop(Math.min(100, Math.round((doneChars / totalChars) * 100)), doneChars, totalChars);
           }
 
-          let delay = randMs(Math.floor(baseCharMs * 0.72), Math.floor(baseCharMs * 1.42));
-          if (ch === "\n") delay += randMs(220, 480);
-          else if (ch === " " && Math.random() < 0.20) delay += randMs(110, 240);
-          else if (ch === ":" || ch === ";" || ch === "{" || ch === "}" || ch === "(" || ch === ")") delay += randMs(70, 160);
+          let delay = randMs(Math.floor(baseStepMs * 0.7), Math.floor(baseStepMs * 1.3));
+          if (piece.includes("\n")) delay += randMs(12, 30);
           await sleep(delay);
         }
 
         const newLineCount = text.split("\n").length;
         lineDelta += newLineCount - oldLineCount;
-        await sleep(randMs(320, 620));
+        await sleep(randMs(80, 160));
       }
 
       return { ok: true, type: "cm6-view" };
@@ -1334,7 +1547,7 @@
     return { ok: true, type: "cm6-dom" };
   }
 
-  async function humanTypeLocal({ edits = [], targetTotalMs = 42000, lockedLines = [] }) {
+  async function humanTypeLocal({ edits = [], targetTotalMs = 10000, lockedLines = [] }) {
     const ed = detectEditorRecursive(document, window);
     if (!ed) return { ok: false, error: "Code editor nahi mila." };
     if (!Array.isArray(edits) || edits.length === 0) return { ok: false, error: "Koi code edit nahi mila." };
@@ -1345,7 +1558,7 @@
 
     const sortedEdits = [...edits].sort((a, b) => (b.start_line || 1) - (a.start_line || 1));
     const totalChars = Math.max(1, sortedEdits.reduce((sum, e) => sum + (e.code || "").length, 0));
-    const baseCharMs = Math.max(68, Math.min(145, Math.floor(targetTotalMs / totalChars)));
+    const baseCharMs = Math.max(5, Math.min(28, Math.floor(targetTotalMs / totalChars)));
     let doneChars = 0;
 
     if (ed.type === "ace") {
@@ -1591,11 +1804,32 @@
 
       if (type === "CLICK_BUTTON") {
         const targets = payload?.targets || [];
+        const preferEditor = Boolean(payload?.preferEditorSubmit);
+        const ed = detectEditorRecursive(document, window);
+
+        // For coding problems, ALWAYS click the top-right green '▶ Submit' button inside the editor FIRST!
+        if (preferEditor) {
+          if (ed && clickCodeSubmitInDoc(ed.doc)) {
+            window.postMessage({ source: "CT_BRIDGE", id, type: "CLICK_BUTTON_RES", payload: { ok: true, where: "editor-top" } }, "*");
+            return;
+          }
+          const remote = await askChildFrames(id, "CLICK_BUTTON", payload || {}, 2000);
+          if (remote && remote.ok) {
+            window.postMessage({ source: "CT_BRIDGE", id, type: "CLICK_BUTTON_RES", payload: remote }, "*");
+            return;
+          }
+          if (clickCodeSubmitInDoc(document) || clickButtonInDoc(document, targets)) {
+            window.postMessage({ source: "CT_BRIDGE", id, type: "CLICK_BUTTON_RES", payload: { ok: true, where: "top-fallback" } }, "*");
+            return;
+          }
+          window.postMessage({ source: "CT_BRIDGE", id, type: "CLICK_BUTTON_RES", payload: { ok: false } }, "*");
+          return;
+        }
+
         if (clickButtonInDoc(document, targets)) {
           window.postMessage({ source: "CT_BRIDGE", id, type: "CLICK_BUTTON_RES", payload: { ok: true } }, "*");
           return;
         }
-        const ed = detectEditorRecursive(document, window);
         if (ed && clickButtonInDoc(ed.doc, targets)) {
           window.postMessage({ source: "CT_BRIDGE", id, type: "CLICK_BUTTON_RES", payload: { ok: true } }, "*");
           return;
@@ -1651,13 +1885,13 @@
       if (type === "EVAL_TESTS") {
         const ed = detectEditorRecursive(document, window);
         if (ed) {
-          const evalRes = evaluateTestResultsInDoc(ed.doc);
+          const evalRes = await evaluateTestResultsInDoc(ed.doc);
           window.postMessage({ source: "CT_BRIDGE", id, type: "EVAL_TESTS_RES", payload: evalRes }, "*");
           return;
         }
-        const remote = await askChildFrames(id, "EVAL_TESTS", {}, 2500);
+        const remote = await askChildFrames(id, "EVAL_TESTS", {}, 3500);
         window.postMessage(
-          { source: "CT_BRIDGE", id, type: "EVAL_TESTS_RES", payload: remote || evaluateTestResultsInDoc(document) },
+          { source: "CT_BRIDGE", id, type: "EVAL_TESTS_RES", payload: remote || (await evaluateTestResultsInDoc(document)) },
           "*"
         );
         return;
@@ -1768,7 +2002,10 @@
       }
 
       if (type === "CLICK_BUTTON") {
-        if (clickButtonInDoc(document, payload?.targets || [])) {
+        const hit = payload?.preferEditorSubmit
+          ? clickCodeSubmitInDoc(document)
+          : clickButtonInDoc(document, payload?.targets || []);
+        if (hit) {
           window.top.postMessage({ source: "CT_FRAME_TO_TOP", id, type, payload: { ok: true } }, "*");
         } else {
           broadcastToChildFrames(data);
@@ -1790,7 +2027,7 @@
         const localEd = detectEditorRecursive(document, window);
         if (localEd) {
           window.top.postMessage(
-            { source: "CT_FRAME_TO_TOP", id, type, payload: evaluateTestResultsInDoc(localEd.doc) },
+            { source: "CT_FRAME_TO_TOP", id, type, payload: await evaluateTestResultsInDoc(localEd.doc) },
             "*"
           );
         } else {

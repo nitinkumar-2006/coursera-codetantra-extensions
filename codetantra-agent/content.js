@@ -48,6 +48,7 @@ let autoInterval = null;
 let isBusy = false;
 let tickInFlight = false;
 let solvedUrls = new Set();
+let failedUrls = new Set();
 let lastHashUrl = window.location.href;
 let slideEnteredAt = Date.now();
 let pendingBridgeCalls = new Map();
@@ -250,7 +251,7 @@ function createPanel() {
     <div style="font-weight: 600; margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center; gap:6px;">
       <span style="display:flex; align-items:center; gap:4px; flex-wrap:nowrap;">
         <span style="color:#ffffff; white-space:nowrap;">CodeTantra</span>
-        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 5px; border-radius:6px;">v7.5</span>
+        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 5px; border-radius:6px;">v8.6</span>
         <button id="ct-set-key" class="ct-icon-btn ct-key-missing" title="Set CodeTantra-only Gemini API Key">Set Key</button>
         <button id="ct-scan-top" class="ct-icon-btn" title="Jump to topmost incomplete pink question">Top</button>
         <button id="ct-lang-btn" class="ct-icon-btn" title="Preferred language for multi-lang editors">Lang</button>
@@ -281,6 +282,7 @@ function createPanel() {
       return;
     }
     apiCooldownUntil = 0;
+    failedUrls.delete(window.location.href);
     solveCurrentSlide({ autoSubmitAndNext: false });
   });
   const langBtn = document.getElementById("ct-lang-btn");
@@ -663,7 +665,7 @@ async function clickNextSlide() {
   const res = await callBridge("CLICK_BUTTON", { targets: ["next >", "next", "next lesson", "next question"] }, 3000);
   if (res && res.ok) return true;
 
-  // Fallback 1: "About this unit" / module overview page where Next > button doesn't exist
+  // Fallback: "About this unit" / module overview page where Next > button doesn't exist
   const beforeUrl = window.location.href;
   const unitRes = await callBridge("OPEN_UNIT_ITEM", {}, 3000);
   if (unitRes && unitRes.ok) {
@@ -673,24 +675,17 @@ async function clickNextSlide() {
     return window.location.href !== beforeUrl;
   }
 
-  // Fallback 2: Open left sidebar and jump to topmost incomplete unit/question (e.g. after 21.2.1 -> 22.1.1)
-  const sideRes = await callBridge("OPEN_NEXT_SIDEBAR_ITEM", {}, 6000);
-  if (sideRes && sideRes.ok) {
-    setStatus("Opening next unit...", "#86efac");
-    setOutput(`Sidebar se agla incomplete question khola:\n${sideRes.title}`);
-    await sleep(1200);
-    return window.location.href !== beforeUrl;
-  }
-
+  // Never randomly yank the user to another unit via sidebar from a question slide!
+  // Sidebar jump only happens when the user clicks 'Top' or an overview unit is 100% completed.
   setStatus("Next btn missing", "#facc15");
   return false;
 }
 
 // ---------------- 1. CODING PROBLEM SOLVER ----------------
 async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
-  // Step 0: If user selected a preferred language (e.g. JAVA/PYTHON) via 'Lang' button, switch multi-lang dropdown first!
+  // Step 0: If user selected a preferred language (e.g. JAVA/PYTHON) via 'Lang' button, ALWAYS switch multi-lang dropdown first!
   const prefLang = localStorage.getItem("ct_preferred_lang") || "auto";
-  if (prefLang !== "auto" && edState.language && edState.language.toLowerCase() !== prefLang) {
+  if (prefLang !== "auto" && (!edState.language || edState.language.toLowerCase() !== prefLang)) {
     setStatus(`Switching -> ${prefLang.toUpperCase()}`, "#60a5fa");
     const sw = await callBridge("SWITCH_LANG", { lang: prefLang }, 4000);
     if (sw && sw.ok && !sw.already) {
@@ -747,36 +742,11 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
   let previousError = existingEval && existingEval.status === "failed" ? existingEval.summary || "" : "";
   let { pkg: errRequiredPkg, cls: errRequiredClass } = extractJavaPkgAndClassFromError(previousError);
 
-  // AUTO-RESET GUARDRAIL: If editor is blank/wiped OR pink starter package was deleted earlier, Reset FIRST!
+  // NEVER wipe working code with Reset on compiler/class errors — read the exact error and fix ONLY the broken line(s)!
   let activeEdState = edState;
-  const looksWipedOrBroken =
-    (activeEdState.code || "").trim().length < 15 ||
-    (errRequiredPkg && !(activeEdState.code || "").includes(errRequiredPkg));
-  if (looksWipedOrBroken) {
-    const didReset = await resetCodeEditor("Editor blank ya broken starter code mila.");
-    if (didReset) {
-      const freshState = await callBridge("READ_EDITOR", {}, 5000);
-      if (freshState && freshState.found) {
-        activeEdState = freshState;
-      }
-    }
-  }
 
   for (let attempt = 1; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
     let currentState = attempt === 1 ? activeEdState : await callBridge("READ_EDITOR", {}, 5000);
-    // On retry after a compilation/syntax/class error, Reset cleanly first so we never pile edits on broken code
-    if (
-      attempt > 1 &&
-      /(syntaxerror|indentationerror|compilation error|noclassdeffounderror|classnotfoundexception|wrong name:|cannot find symbol)/i.test(
-        previousError || ""
-      )
-    ) {
-      const didReset = await resetCodeEditor("Compilation/Syntax error — clean starter par reset kar raha hoon.");
-      if (didReset) {
-        const freshState = await callBridge("READ_EDITOR", {}, 5000);
-        if (freshState && freshState.found) currentState = freshState;
-      }
-    }
     const latestErrInfo = extractJavaPkgAndClassFromError(previousError);
     if (latestErrInfo.pkg) errRequiredPkg = latestErrInfo.pkg;
     if (latestErrInfo.cls) errRequiredClass = latestErrInfo.cls;
@@ -799,10 +769,10 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
       const typeRes = await callBridge("TYPE_CODE", { edits: fixEdits, targetTotalMs: 4000 }, 60000);
       if (typeRes && typeRes.ok && autoSubmitAndNext) {
         await sleep(450);
-        await callBridge("CLICK_BUTTON", { targets: ["submit", "submit code", "compile & run"] }, 3000);
+        await callBridge("CLICK_BUTTON", { targets: ["submit", "submit code", "compile & run"], preferEditorSubmit: true }, 3000);
         setStatus("Evaluating tests...", "#60a5fa");
         let evalRes = { status: "unknown", summary: "" };
-        for (let poll = 0; poll < 14; poll++) {
+        for (let poll = 0; poll < 22; poll++) {
           await sleep(800);
           evalRes = await callBridge("EVAL_TESTS", {}, 2000);
           if (evalRes && (evalRes.status === "passed" || evalRes.status === "failed")) break;
@@ -834,7 +804,7 @@ Detected Language: ${lang}
 Problem Statement & Sample Test Cases:
 ${problemText}
 
-${previousError ? `CRITICAL — READ THIS EXACT ERROR FROM TEST CASE RUNNER FIRST AND FIX ITS ROOT CAUSE:\n${previousError}\n${errRequiredPkg ? `MANDATORY: Line 1 MUST have '${errRequiredPkg}' and the main class MUST be '${errRequiredClass}'!\n` : ""}DO NOT delete working code and rewrite blindly — fix ONLY the exact lines causing this error!\n\n` : ""}Current Code in Editor (1-based line numbers with [LOCKED] vs [EDITABLE] hints):
+${previousError ? `CRITICAL — SURGICAL FIX ONLY! READ THIS EXACT COMPILER / TEST-CASE ERROR AND FIX ONLY THE BROKEN LINE(S):\n${previousError}\n${errRequiredPkg ? `MANDATORY: Line 1 MUST have '${errRequiredPkg}' and the main class MUST be '${errRequiredClass}'!\n` : ""}FORBIDDEN: NEVER use "mode": "replace_all" and NEVER rewrite unchanged methods! Return ONLY the minimal "replace_lines" edit(s) for the exact broken line range!\n\n` : ""}Current Code in Editor (1-based line numbers with [LOCKED] vs [EDITABLE] hints):
 ${numberedStarter}
 Return ONLY valid JSON in this exact format:
 {
@@ -883,6 +853,15 @@ Strict Rules:
       ? [{ mode: parsed.mode || "replace_all", start_line: parsed.start_line || 1, end_line: parsed.end_line || 1, code: parsed.code }]
       : [];
 
+    // Guard against malformed multi-Full hallucinated arrays (e.g. 50x replace_all blocks from flash-lite)
+    if (edits.length > 1 && edits.every((e) => e.mode === "replace_all" || !e.start_line)) {
+      edits = [{ mode: "replace_all", start_line: 1, end_line: 1, code: edits.map((e) => e.code || "").join("\n") }];
+    } else if (edits.length > 12) {
+      previousError = "Too many fragmented edit blocks returned. Return 1 clean edit block per editable region.";
+      setStatus(`Cleanup retry (${attempt})...`, "#facc15");
+      continue;
+    }
+
     if (!edits.length) {
       setStatus("Empty code", "#facc15");
       setOutput("Gemini ne koi valid code edit return nahi kiya.");
@@ -914,8 +893,8 @@ Strict Rules:
       structuralWarnings.push("MISSING PUBLIC CLASS: Starter code requires public class " + origPubClass);
     }
 
-    // Step 3 (Quota-smart): Run 1 focused internal QA pass only when structural warnings exist or on retry (saves 60% API quota!)
-    const needQaPass = structuralWarnings.length > 0 || attempt > 1;
+    // Step 3 (Quota-smart): Run internal QA pass ONLY when structural warnings exist (never burn extra quota on retries!)
+    const needQaPass = structuralWarnings.length > 0;
     for (let vPass = 1; vPass <= (needQaPass ? 1 : 0); vPass++) {
       const previewNow = assembleCode(currentState.code, edits);
       const warningsNow = [];
@@ -979,14 +958,73 @@ Task:
       }
     }
 
-    // Normalize edit modes so start_line >= 1 is ALWAYS replace_lines (never accidentally Full wipe!)
-    edits = edits.map((e) => ({
-      ...e,
-      mode: e.start_line >= 1 && e.mode !== "replace_all" ? "replace_lines" : e.mode || (e.start_line >= 1 ? "replace_lines" : "replace_all")
-    }));
+    // CODE-LEVEL SURGICAL DIFF GUARD: On Attempt > 1 (or whenever code already exists in editor), NEVER delete unchanged lines!
+    // Even if Gemini returns 'replace_all', trim identical top/bottom lines so ONLY the actual changed lines are edited!
+    function computeSurgicalDiffEdit(oldCode, newCode, lockedList) {
+      const oldLines = (oldCode || "").replace(/\r\n/g, "\n").split("\n");
+      const newLines = (newCode || "").replace(/\r\n/g, "\n").split("\n");
+      if (oldLines.length < 5) return null;
+      const lockedSet = new Set(lockedList || []);
+      let prefix = 0;
+      while (prefix < oldLines.length && prefix < newLines.length && oldLines[prefix] === newLines[prefix]) {
+        prefix++;
+      }
+      let suffix = 0;
+      while (
+        suffix < oldLines.length - prefix &&
+        suffix < newLines.length - prefix &&
+        oldLines[oldLines.length - 1 - suffix] === newLines[newLines.length - 1 - suffix]
+      ) {
+        suffix++;
+      }
+      if (prefix + suffix >= oldLines.length && prefix + suffix >= newLines.length) return null;
+      let startLine = prefix + 1;
+      let endLine = oldLines.length - suffix;
+      if (startLine > endLine) {
+        if (prefix > 0 && !lockedSet.has(prefix)) {
+          startLine = prefix;
+          endLine = prefix;
+          const inserted = [oldLines[prefix - 1], ...newLines.slice(prefix, newLines.length - suffix)];
+          return { mode: "replace_lines", start_line: startLine, end_line: endLine, code: inserted.join("\n") };
+        } else if (startLine <= oldLines.length && !lockedSet.has(startLine)) {
+          endLine = startLine;
+          const inserted = [...newLines.slice(prefix, newLines.length - suffix), oldLines[startLine - 1]];
+          return { mode: "replace_lines", start_line: startLine, end_line: endLine, code: inserted.join("\n") };
+        }
+        return null;
+      }
+      for (let ln = startLine; ln <= endLine; ln++) {
+        if (lockedSet.has(ln)) return null;
+      }
+      const changedSlice = newLines.slice(prefix, newLines.length - suffix);
+      return { mode: "replace_lines", start_line: startLine, end_line: endLine, code: changedSlice.join("\n") };
+    }
 
-    // Balanced natural human typing pace (~35-52s on 1st attempt, ~25-38s on fix)
-    const targetTotalMs = attempt === 1 ? randMs(35000, 52000) : randMs(25000, 38000);
+    if (attempt > 1 && (currentState.code || "").split("\n").length >= 5) {
+      const targetFull = assembleCode(currentState.code, edits);
+      const surgical = computeSurgicalDiffEdit(currentState.code, targetFull, currentState.lockedLines);
+      if (surgical) {
+        edits = [surgical];
+      } else {
+        edits = edits.map((e) => ({
+          ...e,
+          mode: e.start_line >= 1 && e.mode !== "replace_all" ? "replace_lines" : e.mode || (e.start_line >= 1 ? "replace_lines" : "replace_all")
+        }));
+      }
+    } else if (attempt === 1 && (currentState.lockedLines || []).length === 0 && edits.length > 1) {
+      const mergedCode = assembleCode(currentState.code, edits);
+      if (mergedCode && mergedCode.trim().length > 10) {
+        edits = [{ mode: "replace_all", start_line: 1, end_line: 1, code: mergedCode }];
+      }
+    } else {
+      edits = edits.map((e) => ({
+        ...e,
+        mode: e.start_line >= 1 && e.mode !== "replace_all" ? "replace_lines" : e.mode || (e.start_line >= 1 ? "replace_lines" : "replace_all")
+      }));
+    }
+
+    // Turbo typing pace (~5.5-7.5s on 1st attempt, ~1.5-3s on surgical compiler/test fix)
+    const targetTotalMs = attempt === 1 ? randMs(5500, 7500) : randMs(1500, 3000);
     const blockSummary = edits
       .map((e) => (e.start_line >= 1 && e.mode !== "replace_all" ? `L${e.start_line}-L${e.end_line || e.start_line}` : "Full"))
       .join(", ");
@@ -1010,17 +1048,27 @@ Task:
     }
 
     await sleep(450);
-    const subRes = await callBridge("CLICK_BUTTON", { targets: ["submit", "submit code", "compile & run"] }, 3000);
+    setStatus("Submitting code...", "#60a5fa");
+    const subRes = await callBridge(
+      "CLICK_BUTTON",
+      { targets: ["submit", "submit code", "compile & run"], preferEditorSubmit: true },
+      3000
+    );
 
     if (!subRes || !subRes.ok) {
+      apiCooldownUntil = Date.now() + 30000;
       setStatus("Submit btn missing", "#facc15");
+      setOutput("Submit button click nahi hua — code ko dobara nahi likh raha. Ek baar manual Submit check karo.");
       return;
     }
 
     setStatus("Evaluating tests...", "#60a5fa");
+    setOutput("Submit daba diya — test cases aur compiler output padhne ka wait kar raha hoon...");
+    // Give CodeTantra 1.2s to clear old output & start compiling new submission
+    await sleep(1200);
 
     let evalRes = { status: "unknown", summary: "" };
-    for (let poll = 0; poll < 14; poll++) {
+    for (let poll = 0; poll < 25; poll++) {
       await sleep(800);
       evalRes = await callBridge("EVAL_TESTS", {}, 2000);
       if (evalRes && (evalRes.status === "passed" || evalRes.status === "failed")) {
@@ -1028,19 +1076,39 @@ Task:
       }
     }
 
+    // If test runner didn't show result yet, click bottom Submit pill once as backup and wait 10s
+    if (evalRes.status === "unknown") {
+      await callBridge("CLICK_BUTTON", { targets: ["submit", "submit code", "compile & run"] }, 2500);
+      for (let poll = 0; poll < 12; poll++) {
+        await sleep(800);
+        evalRes = await callBridge("EVAL_TESTS", {}, 2000);
+        if (evalRes && (evalRes.status === "passed" || evalRes.status === "failed")) {
+          break;
+        }
+      }
+    }
+
     if (evalRes.status === "passed") {
       solvedUrls.add(window.location.href);
       setStatus("100% Passed ✓", "#86efac");
       setOutput(`${evalRes.summary}\nSab test cases pass! Next question par jaa raha hoon...`);
-      await sleep(1800);
+      await sleep(800);
       await clickNextSlide();
       return;
     }
 
+    // NEVER blindly rewrite the whole code if test runner status is still unknown (no actual failure detected!)
+    if (evalRes.status === "unknown") {
+      failedUrls.add(window.location.href);
+      setStatus("Check Test Cases", "#facc15");
+      setOutput("Code likh kar Submit daba diya tha, par test result screen par nahi mila — dobara nahi likh raha. Test cases tab check karo ya 'Solve & Type' dabao.");
+      return;
+    }
+
     if (attempt === MAX_FIX_ATTEMPTS) {
-      apiCooldownUntil = Date.now() + 25000;
-      setStatus("Check test cases", "#facc15");
-      setOutput(`Attempt ${attempt} ke baad result:\n${evalRes.summary || "Manual check needed."}\n(25s pause — quota save kar raha hoon)`);
+      failedUrls.add(window.location.href);
+      setStatus("Paused (3/3 fail)", "#facc15");
+      setOutput(`3 tries ke baad ye error aaya (loop rok diya hai):\n${(evalRes.summary || "Manual check needed.").slice(0, 320)}`);
       return;
     }
 
@@ -1276,29 +1344,27 @@ async function runAutoTick() {
       return;
     }
 
-    // Give iframes, CodeMirror 6, and Pyodide plenty of time to mount cleanly
-    if (Date.now() - slideEnteredAt < 3000) {
+    // Give iframes, CodeMirror 6, and Pyodide time to mount cleanly
+    if (Date.now() - slideEnteredAt < 1800) {
       setStatus("Loading slide...", "#9ca3af");
       return;
     }
 
-    // Skip explicitly blocked slides (e.g. 29.1.6) immediately without solving or calling API
-    if (isBlockedSlideText(document.body?.innerText?.slice(0, 2500) || "")) {
-      solvedUrls.add(window.location.href);
-      setStatus("Blocked 29.1.6 → Skip", "#facc15");
-      setOutput("29.1.6 blocked hai — skip karke agle question par jaa raha hoon...");
-      await sleep(700);
-      await clickNextSlide();
+    // If this exact question already finished 3 attempts and failed, don't endlessly re-type it — pause until user moves or clicks Solve & Type!
+    if (failedUrls.has(window.location.href)) {
+      setStatus("Paused (check err)", "#facc15");
       return;
     }
 
     // NEVER blindly skip a coding/quiz page via solvedUrls — always verify actual test-case pass status!
     const edState = await callBridge("READ_EDITOR", {}, 3500);
     if (edState && edState.found) {
-      if (isBlockedSlideText(edState.problemText || "")) {
+      // Check ONLY this active coding problem's own sidebar-stripped statement (NEVER sidebar/panel!)
+      const activeProblemHead = (edState.problemText || "").slice(0, 500);
+      if (/koko eating bananas/i.test(activeProblemHead)) {
         solvedUrls.add(window.location.href);
-        setStatus("Blocked 29.1.6 → Skip", "#facc15");
-        setOutput("29.1.6 blocked hai — skip karke agle question par jaa raha hoon...");
+        setStatus("Skipped 29.1.6", "#facc15");
+        setOutput("29.1.6 (Koko Eating Bananas) skip kiya — agle question par jaa raha hoon...");
         await sleep(700);
         await clickNextSlide();
         return;
@@ -1359,8 +1425,8 @@ async function runAutoTick() {
       }
     }
 
-    // Only advance pure theory/reading slides calmly after 7 seconds
-    if (Date.now() - slideEnteredAt >= 7000) {
+    // Only advance pure theory/reading slides calmly after 10 seconds
+    if (Date.now() - slideEnteredAt >= 10000) {
       const moved = await clickNextSlide();
       if (moved) {
         solvedUrls.add(window.location.href);
