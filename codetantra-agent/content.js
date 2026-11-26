@@ -21,10 +21,10 @@ try {
     }
     localStorage.setItem("ct_seeded_key_5cfg", "done");
   }
-  // v10.9: Default to Java on multi-language DSA questions (editable anytime inside ⚙ Settings drawer)
-  if (localStorage.getItem("ct_v109_default_java") !== "done") {
-    localStorage.setItem("ct_preferred_lang", "java");
-    localStorage.setItem("ct_v109_default_java", "done");
+  // v11.3: Smart Auto-Language default (auto-detects Python/WebTech/Java/C; asks once on multi-lang DSA dropdowns)
+  if (localStorage.getItem("ct_v113_smart_auto") !== "done") {
+    localStorage.setItem("ct_preferred_lang", "auto");
+    localStorage.setItem("ct_v113_smart_auto", "done");
   }
 } catch {}
 
@@ -315,7 +315,7 @@ function createPanel() {
     <div style="font-weight: 600; margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center; gap:6px;">
       <span style="display:flex; align-items:center; gap:5px; flex-wrap:nowrap;">
         <span style="color:#ffffff; white-space:nowrap; font-size:13px;">CodeTantra</span>
-        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v11.1</span>
+        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v11.9</span>
         <button id="ct-mode-btn" class="ct-icon-btn ct-mode-active" title="Active AI Mode (click to toggle Web / API)">Web</button>
       </span>
       <span style="display:flex; align-items:center; gap:6px;">
@@ -333,12 +333,13 @@ function createPanel() {
       </div>
       <div style="display:flex; align-items:center; justify-content:space-between; gap:4px; margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid rgba(255,255,255,0.10);">
         <span style="font-size:11px; color:#e5e7eb;">Lang:</span>
-        <span style="display:flex; gap:4px;">
-          <button class="ct-icon-btn ct-lang-chip" data-lang="java" style="padding:2px 7px;">Java</button>
-          <button class="ct-icon-btn ct-lang-chip" data-lang="cpp" style="padding:2px 6px;">C++</button>
-          <button class="ct-icon-btn ct-lang-chip" data-lang="c" style="padding:2px 6px;">C</button>
-          <button class="ct-icon-btn ct-lang-chip" data-lang="python" style="padding:2px 6px;">Py</button>
+        <span style="display:flex; gap:3px; flex-wrap:wrap; justify-content:flex-end;">
           <button class="ct-icon-btn ct-lang-chip" data-lang="auto" style="padding:2px 6px;">Auto</button>
+          <button class="ct-icon-btn ct-lang-chip" data-lang="java" style="padding:2px 6px;">Java</button>
+          <button class="ct-icon-btn ct-lang-chip" data-lang="python" style="padding:2px 6px;">Py</button>
+          <button class="ct-icon-btn ct-lang-chip" data-lang="webtech" style="padding:2px 6px;">WebTech</button>
+          <button class="ct-icon-btn ct-lang-chip" data-lang="cpp" style="padding:2px 5px;">C++</button>
+          <button class="ct-icon-btn ct-lang-chip" data-lang="c" style="padding:2px 5px;">C</button>
         </span>
       </div>
       <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; font-size:11px; color:#e5e7eb;">
@@ -434,13 +435,14 @@ function createPanel() {
   // Auto-Language Switcher inside Settings Drawer (default: Java for DSA)
   const langChips = Array.from(panel.querySelectorAll(".ct-lang-chip"));
   function applyPreferredLang(langVal) {
-    const normalized = langVal || "java";
+    const normalized = langVal || "auto";
     localStorage.setItem("ct_preferred_lang", normalized);
+    if (normalized !== "auto") sessionStorage.removeItem("ct_multilang_choice");
     langChips.forEach((chip) => {
       chip.classList.toggle("ct-mode-active", chip.dataset.lang === normalized);
     });
   }
-  applyPreferredLang(localStorage.getItem("ct_preferred_lang") || "java");
+  applyPreferredLang(localStorage.getItem("ct_preferred_lang") || "auto");
   langChips.forEach((chip) => {
     chip.addEventListener("click", () => {
       applyPreferredLang(chip.dataset.lang);
@@ -751,13 +753,18 @@ async function callChatGptWeb(prompt) {
   }
 }
 
-async function callGemini(prompt, { expectJson = true, useChatGptFallback = false } = {}) {
-  if (useChatGptFallback && isWebMode()) {
+async function callGemini(prompt, { expectJson = true, useChatGptFallback = false, preferApiRescue = false, forceApi = false } = {}) {
+  // FAST API-KEY RESCUE: On compiler/retry errors in Web mode, if user has a valid CodeTantra API key, try fast API first (~3s, zero markdown corruption)!
+  if (preferApiRescue && isWebMode() && hasValidApiKey()) {
+    const rescueRes = await callGemini(prompt, { expectJson, useChatGptFallback: false, preferApiRescue: false, forceApi: true });
+    if (rescueRes && rescueRes.ok) return rescueRes;
+  }
+  if (useChatGptFallback && isWebMode() && !forceApi) {
     const gptRes = await callChatGptWeb(prompt);
     if (gptRes && gptRes.ok) return gptRes;
   }
   // ZERO-API-KEY MODE: Route directly through logged-in gemini.google.com background tab!
-  if (isWebMode()) {
+  if (isWebMode() && !forceApi) {
     setStatus("AI: Gemini Web...", "#93c5fd");
     setOutput("Free Gemini Web (gemini.google.com) se answer laa raha hoon (0 API Key)...");
     try {
@@ -907,9 +914,23 @@ async function clickNextSlide() {
 
 // ---------------- 1. CODING PROBLEM SOLVER ----------------
 async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
-  // Step 0: If user selected a preferred language (e.g. JAVA/PYTHON) via 'Lang' button, ALWAYS switch multi-lang dropdown first!
-  const prefLang = localStorage.getItem("ct_preferred_lang") || "auto";
-  if (prefLang !== "auto" && (!edState.language || edState.language.toLowerCase() !== prefLang)) {
+  // Step 0: Smart Auto-Language Detection + Ask Once on Multi-Language DSA Dropdowns!
+  let prefLang = localStorage.getItem("ct_preferred_lang") || "auto";
+  if (prefLang === "auto" && edState.hasMultiLangDropdown) {
+    let savedMulti = sessionStorage.getItem("ct_multilang_choice") || "";
+    if (!savedMulti) {
+      const asked = prompt(
+        "Is multi-language question ke liye kaunsa language select karoon? (java / cpp / python / c):",
+        edState.language || "java"
+      );
+      savedMulti = (asked || edState.language || "java").trim().toLowerCase();
+      if (savedMulti === "c++") savedMulti = "cpp";
+      if (savedMulti === "py") savedMulti = "python";
+      sessionStorage.setItem("ct_multilang_choice", savedMulti);
+    }
+    prefLang = savedMulti;
+  }
+  if (prefLang !== "auto" && prefLang !== "webtech" && (!edState.language || edState.language.toLowerCase() !== prefLang)) {
     setStatus(`Switching -> ${prefLang.toUpperCase()}`, "#60a5fa");
     const sw = await callBridge("SWITCH_LANG", { lang: prefLang }, 4000);
     if (sw && sw.ok && !sw.already) {
@@ -1108,7 +1129,7 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
 
     const prompt = `You are a senior software engineer helping me fix and solve a CodeTantra coding problem (${lang}).
 
-${previousError ? `I just ran the current code below in CodeTantra and got this EXACT error:\n${previousError}\n${errRequiredPkg ? `MANDATORY: Line 1 MUST have '${errRequiredPkg}' and the main class MUST be '${errRequiredClass}'!\n` : ""}Please check the exact line number, symbol/method name, and every method called by [LOCKED] lines (for example, if a [LOCKED] line calls a helper method that is missing, implement that exact method with the exact signature inside an <<< EDITABLE SLOT N >>>!). Fix the exact cause of this error so it compiles cleanly and passes all test cases.\n\n` : ""}Detected Language: ${lang}
+${previousError ? `I just ran the current code below in CodeTantra and got these EXACT errors / failed test-case diffs (from Test case 1, 2, 3...):\n${previousError}\n${errRequiredPkg ? `MANDATORY: Line 1 MUST have '${errRequiredPkg}' and the main class MUST be '${errRequiredClass}'!\n` : ""}Please inspect EVERY failed test case above (including exact spacing, decimal/float formatting like 25000.5 vs 25000.50, dots, newlines, line numbers, symbol/method names, and every method called by [LOCKED] lines). Fix ONLY the exact cause so it compiles cleanly and passes ALL test cases.\n\n` : ""}Detected Language: ${lang}
 Editable Slots to fill/fix: ${slotGuide}
 
 Problem Statement & Sample Test Cases:
@@ -1117,7 +1138,7 @@ ${problemText}
 Current Code in Editor (ONLY the code inside <<< EDITABLE SLOT N >>> ... <<< END SLOT N >>> can be changed; NEVER repeat or modify [LOCKED] lines):
 ${slottedCode}
 
-OUTPUT FORMAT — DO NOT USE JSON! Wrap your ENTIRE reply inside ONE fenced code block (triple backticks) so exact 4-space Python indentation and __init__ underscores are NEVER stripped:
+OUTPUT FORMAT — DO NOT USE JSON! Wrap your ENTIRE reply inside ONE fenced code block (triple backticks) so exact Python indentation and __init__ underscores are NEVER stripped:
 \`\`\`text
 <<<SLOT 1>>>
 ...complete compiling replacement code for EDITABLE SLOT 1 ONLY (NO [LOCKED] lines, exact indentation)...
@@ -1126,16 +1147,18 @@ OUTPUT FORMAT — DO NOT USE JSON! Wrap your ENTIRE reply inside ONE fenced code
 
 Strict Rules:
 - Write ONLY in ${lang}!
-- CRITICAL FOR PYTHON: ALWAYS wrap your <<<SLOT N>>> output inside triple backticks so 4-space/8-space indentation and double underscores (__init__, __str__) are 100% preserved! Every method inside a class MUST be indented 4 spaces, and every statement inside a method/if/for MUST be indented +4 spaces!
+- CRITICAL FOR PYTHON: ALWAYS wrap your <<<SLOT N>>> output inside triple backticks so indentation and double underscores (__init__, __str__) are 100% preserved! Every method inside a class MUST be indented 1 level (4 spaces or 1 tab), and every statement inside a method/if/for MUST be indented +1 level!
 - Format code cleanly on multiple lines with proper indentation (NEVER put multiple statements on a single line!).
 - Read the EXACT input format specified in the Problem Statement (e.g., read 'int n = sc.nextInt();' first, then 'for (int i = 0; i < n; i++)' — NEVER use 'while (sc.hasNextInt())' when 'n' is given, or CodeTantra will fail with "reading more inputs than expected"!).
 - Return COMPLETE, compiling, balanced-braces code for EVERY <<< EDITABLE SLOT N >>> that needs code or fixes.
 - Do NOT include any [LOCKED] lines inside <<<SLOT N>>> ... <<<END_SLOT N>>>!
-- Match Sample Test Cases & Expected vs Actual output character-for-character (spaces, arrows, punctuation, newlines).
-- Preserve exact indentation (especially 4 spaces in Python) and preserve existing Java 'package ...;' and 'public class ...' names.`;
+- Match Sample Test Cases & Expected vs Actual output character-for-character (spaces, decimals/floats, dots, arrows, punctuation, newlines).
+- Preserve exact indentation and preserve existing Java 'package ...;' and 'public class ...' names.`;
 
+    const isCompileRetry = Boolean(previousError) && /compilation error|error in |cannot find symbol|illegal start|not a statement|expected|indentationerror|syntaxerror|taberror/i.test(previousError);
+    const shouldUseApiRescue = isWebMode() && hasValidApiKey() && (isCompileRetry || attempt >= 2);
     const shouldUseChatGpt = isWebMode() && (consecutiveSameCode >= 1 || attempt === 3 || attempt === 5);
-    const apiRes = await callGemini(prompt, { expectJson: false, useChatGptFallback: shouldUseChatGpt });
+    const apiRes = await callGemini(prompt, { expectJson: false, useChatGptFallback: shouldUseChatGpt, preferApiRescue: shouldUseApiRescue });
     if (!apiRes.ok) {
       setStatus("API Error", "#f87171");
       setOutput(`Gemini Error:\n${apiRes.error}`);
@@ -1145,19 +1168,74 @@ Strict Rules:
     const rawReply = (apiRes.rawText || "").trim();
     const fullFileLines = (currentState.code || "").replace(/\r\n/g, "\n").split("\n");
     const isPythonLang = /python/i.test(lang || "");
+    // CodeTantra Python editor inserts real TAB (\t, shown as '---->|') on Enter/Return!
+    // Match the file's exact indentation style: use \t if file uses tabs OR has no space-only starter indent; otherwise keep spaces.
+    const fileHasTabs = /(?:^|\n)\t/.test(currentState.code || "");
+    const fileHasSpaceIndentOnly = !fileHasTabs && /(?:^|\n) {2,}\S/.test(currentState.code || "");
+    const pythonUseTabs = isPythonLang && !fileHasSpaceIndentOnly;
+
+    function normalizePythonIndent(codeStr) {
+      return codeStr
+        .split("\n")
+        .map((line) => {
+          const m = line.match(/^([ \t]+)(.*)$/);
+          if (!m) return line;
+          const ws = m[1];
+          const rest = m[2];
+          if (pythonUseTabs) {
+            const expanded = ws.replace(/\t/g, "    ");
+            const levels = Math.floor(expanded.length / 4);
+            const rem = expanded.length % 4;
+            return "\t".repeat(levels) + (rem >= 2 ? "\t" : "") + rest;
+          } else {
+            return ws.replace(/\t/g, "    ") + rest;
+          }
+        })
+        .join("\n");
+    }
+
     function cleanSlotCode(slotMeta, codeStr) {
       let c = (codeStr || "").replace(/\r\n/g, "\n");
-      c = c.replace(/^```[a-z0-9+#-]*\s*\n/i, "").replace(/\n```\s*$/, "");
+      // Use [ \t]*\n (NEVER \s*\n) so leading indentation on line 1 of the slot is NEVER eaten!
+      c = c.replace(/^```[a-z0-9+#-]*[ \t]*\n/i, "").replace(/\n[ \t]*```[ \t]*$/, "");
       if (isPythonLang) {
         // Guard against Markdown stripping double underscores from Python dunder methods
         c = c.replace(/^(\s*def\s+)init(\s*\()/gm, "$1__init__$2").replace(/^(\s*def\s+)str(\s*\()/gm, "$1__str__$2");
+        c = normalizePythonIndent(c);
       }
       if (!slotMeta) return c;
       const slotLines = c.split("\n");
-      const prevLocked = slotMeta.start_line > 1 ? (fullFileLines[slotMeta.start_line - 2] || "").trim() : "";
+      const prevLockedRaw = slotMeta.start_line > 1 ? fullFileLines[slotMeta.start_line - 2] || "" : "";
+      const prevLocked = prevLockedRaw.trim();
       const nextLocked = slotMeta.end_line < fullFileLines.length ? (fullFileLines[slotMeta.end_line] || "").trim() : "";
       if (prevLocked && slotLines.length > 1 && slotLines[0].trim() === prevLocked) slotLines.shift();
       if (nextLocked && slotLines.length > 1 && slotLines[slotLines.length - 1].trim() === nextLocked) slotLines.pop();
+
+      // PYTHON BLOCK-START GUARD: If the [LOCKED] line immediately above this slot ends with ':' (e.g. 'class Employee:'),
+      // the first non-empty line inside this slot MUST be indented 1 level deeper than that locked header!
+      if (isPythonLang && /:\s*(#.*)?$/.test(prevLocked)) {
+        const unit = pythonUseTabs ? "\t" : "    ";
+        const prevIndentMatch = prevLockedRaw.match(/^([ \t]*)/);
+        const prevIndentNorm = prevIndentMatch ? normalizePythonIndent(prevIndentMatch[1] + "x").slice(0, -1) : "";
+        const requiredIndent = prevIndentNorm + unit;
+        const firstNonEmptyIdx = slotLines.findIndex((l) => l.trim().length > 0);
+        if (firstNonEmptyIdx !== -1) {
+          const firstLine = slotLines[firstNonEmptyIdx];
+          const firstWs = (firstLine.match(/^([ \t]*)/) || ["", ""])[1];
+          if (firstWs.length <= prevIndentNorm.length) {
+            const otherIndented = slotLines.slice(firstNonEmptyIdx + 1).some((l) => l.trim().length > 0 && l.startsWith(requiredIndent));
+            if (otherIndented) {
+              // Only the first line lost its indent — restore exact requiredIndent on that line!
+              slotLines[firstNonEmptyIdx] = requiredIndent + firstLine.trimStart();
+            } else {
+              // Entire slot was shifted left by 1 level — shift every non-empty line right by 1 unit!
+              for (let k = firstNonEmptyIdx; k < slotLines.length; k++) {
+                if (slotLines[k].trim().length > 0) slotLines[k] = unit + slotLines[k];
+              }
+            }
+          }
+        }
+      }
       return slotLines.join("\n");
     }
 
@@ -1166,7 +1244,8 @@ Strict Rules:
     let usedSlotFormat = false;
 
     // TIER 1 (ZERO JSON BUGS): Parse <<<SLOT N>>> ... <<<END_SLOT N>>> raw code blocks
-    const slotRegex = /<<<SLOT\s*(\d+)>>>\s*\n?([\s\S]*?)(?:\n?\s*<<<END_SLOT\s*\1>>>|$)/gi;
+    // CRITICAL: Use [ \t]*\r?\n (NEVER \s*\n) so leading tabs/spaces of line 1 inside the slot are NEVER eaten!
+    const slotRegex = /<<<SLOT\s*(\d+)>>>[ \t]*\r?\n?([\s\S]*?)(?:\r?\n?[ \t]*<<<END_SLOT\s*\1>>>|$)/gi;
     let sm;
     while ((sm = slotRegex.exec(rawReply)) !== null) {
       const slotId = parseInt(sm[1], 10);
@@ -1218,7 +1297,7 @@ Strict Rules:
     // TIER 3 (Plain Fenced Code Fallback): Never throw away a working ```java / ```python code block!
     if (!edits.length && editableSlots.length === 1) {
       const fenceBlocks = [];
-      const fenceRe = /```[a-z0-9+#-]*\s*\n([\s\S]*?)```/gi;
+      const fenceRe = /```[a-z0-9+#-]*[ \t]*\r?\n([\s\S]*?)```/gi;
       let fm;
       while ((fm = fenceRe.exec(rawReply)) !== null) {
         if ((fm[1] || "").trim().length > 15) fenceBlocks.push(fm[1]);
@@ -1275,8 +1354,8 @@ Strict Rules:
 
     const assembledPreview = assembleCode(currentState.code, edits);
 
-    // PYTHON INDENTATION GUARD: Catch zero-indented class/def bodies BEFORE typing into editor!
-    if (isPythonLang && /^class\s+\w+[^:]*:\s*\n\s{0}(?:def|self\.|pass|return)/m.test(assembledPreview)) {
+    // PYTHON INDENTATION GUARD: Catch ANY zero-indented line immediately after 'class ...:' BEFORE typing into editor!
+    if (isPythonLang && /^class\s+\w+[^:]*:[ \t]*\n(?![ \t]+|\n|#)/m.test(assembledPreview)) {
       if (attempt < MAX_FIX_ATTEMPTS) {
         previousError =
           (previousError ? previousError + "\n" : "") +
@@ -1420,9 +1499,8 @@ Task:
       return { mode: "replace_lines", start_line: startLine, end_line: endLine, code: changedSlice.join("\n") };
     }
 
-    const usedSlots = usedSlotFormat;
-    const hadCompileErr = /compilation error|illegal start|cannot find symbol|cannot be applied|error in /i.test(previousError || "");
-    if (attempt > 1 && !hadCompileErr && !usedSlots && (currentState.code || "").split("\n").length >= 5) {
+    // SURGICAL DIFF FIRST: Whenever code already exists and we are fixing an error, ONLY retype the actual changed lines instead of deleting & retyping unchanged lines!
+    if ((attempt > 1 || Boolean(previousError)) && (currentState.code || "").split("\n").length >= 5) {
       const targetFull = assembleCode(currentState.code, edits);
       const surgical = computeSurgicalDiffEdit(currentState.code, targetFull, currentState.lockedLines);
       if (surgical) {
@@ -1468,11 +1546,20 @@ Task:
         return;
       }
       if (attempt < MAX_FIX_ATTEMPTS) {
+        // Auto-click CodeTantra's Reset button so any garbled/half-typed lines are wiped back to clean starter code!
+        setStatus("Resetting editor...", "#facc15");
+        setOutput(`Editor typing issue (${typeErr}) — Reset button dabakar clean starter code wapas laa raha hoon...`);
+        const rst = await callBridge("CLICK_BUTTON", { targets: ["reset", "reset code"] }, 3000);
+        if (rst && rst.ok) {
+          await sleep(600);
+          await callBridge("CLICK_BUTTON", { targets: ["yes", "ok", "confirm", "reset"] }, 2500);
+          await sleep(1200);
+        }
+        lastTypedCodeFingerprint = "";
         previousError =
           (previousError ? previousError + "\n" : "") +
-          `EDITOR REJECTED PREVIOUS EDITS: ${typeErr}. Return valid replace_lines edits ONLY on [EDITABLE] lines (never replace_all, never overlap [LOCKED] lines).`;
+          `EDITOR REJECTED PREVIOUS EDITS (editor was Reset to clean starter): ${typeErr}. Return valid replace_lines edits ONLY on [EDITABLE] lines (never replace_all, never overlap [LOCKED] lines).`;
         setStatus(`Edit retry (${attempt})...`, "#facc15");
-        setOutput(`Edit blocked: ${typeErr}\nRetry ${attempt + 1}/${MAX_FIX_ATTEMPTS} mein safe editable lines fix kar raha hoon...`);
         continue;
       }
       failedUrls.add(window.location.href);
@@ -1511,7 +1598,7 @@ Task:
     let evalRes = { status: "unknown", summary: "" };
     for (let poll = 0; poll < 25; poll++) {
       await sleep(800);
-      evalRes = await callBridge("EVAL_TESTS", {}, 7500);
+      evalRes = await callBridge("EVAL_TESTS", {}, 12500);
       if (evalRes && (evalRes.status === "passed" || evalRes.status === "failed")) {
         break;
       }
@@ -1522,7 +1609,7 @@ Task:
       await callBridge("CLICK_BUTTON", { targets: ["submit", "submit code", "compile & run"] }, 2500);
       for (let poll = 0; poll < 12; poll++) {
         await sleep(800);
-        evalRes = await callBridge("EVAL_TESTS", {}, 7500);
+        evalRes = await callBridge("EVAL_TESTS", {}, 12500);
         if (evalRes && (evalRes.status === "passed" || evalRes.status === "failed")) {
           break;
         }
@@ -1619,11 +1706,13 @@ async function solveMcqQuestion(mcqState, { autoSubmitAndNext = false } = {}) {
     if (screenCorrectAnswers.length > 0 && !triedKeys.has(comboKey(screenCorrectAnswers))) {
       answers = screenCorrectAnswers;
       modelUsed = "Screen-Correct ✓";
-    } else if (attempt <= 2) {
-      setStatus(attempt === 1 ? "Solving Quiz..." : `Quiz retry ${attempt}...`, "#60a5fa");
+    } else if (attempt <= 3) {
+      setStatus(attempt === 1 ? "Solving Quiz..." : attempt === 3 ? "Quiz: ChatGPT..." : `Quiz retry ${attempt}...`, "#60a5fa");
       setOutput(
         attempt === 1
           ? "Objective / Quiz question padh raha hoon..."
+          : attempt === 3
+          ? "Gemini 2 baar galat hua — ab ChatGPT (chatgpt.com) se poochh raha hoon..."
           : `Wrong answer aaya tha — naya option try kar raha hoon (Try ${attempt})...`
       );
 
@@ -1633,23 +1722,25 @@ async function solveMcqQuestion(mcqState, { autoSubmitAndNext = false } = {}) {
             .join("\n")}\nFeedback shown: ${lastFeedback || "Wrong answer"}\n`
         : "";
 
-      const prompt = `You are a computer science professor solving a CodeTantra Objective / Quiz Question (Python, Java, C++, DSA, etc.).
+      const prompt = `You are a computer science professor solving a CodeTantra Objective / Quiz Question (Python, Java, C++, Web Tech HTML/CSS/JS, DSA, etc.).
 
 Question & Context:
 ${mcqState.questionText}
 
-Available Options (copy EXACT verbatim option text from this list ONLY):
+Available Options (copy EXACT verbatim option text from this list ONLY — preserve exact underscores like __add__, __gt__, __str__!):
 ${mcqState.options.map((o) => `- ${o}`).join("\n")}
 
 Question Type: ${mcqState.isMultiSelect ? "Multiple-select (select ONLY the exact correct subset — do NOT blindly select all options!)" : "Single-choice (select EXACTLY ONE option)"}
 ${wrongHistoryBlock}
-Return ONLY valid JSON:
+Wrap your JSON inside a triple-backtick json code block so underscores are NEVER stripped:
+\`\`\`json
 {
   "answers": ["Exact option text here"]
-}`;
+}
+\`\`\``;
 
       try {
-        const apiRes = await callGemini(prompt);
+        const apiRes = await callGemini(prompt, { expectJson: true, useChatGptFallback: attempt === 3 });
         if (apiRes.ok) {
           modelUsed = apiRes.model;
           const cleaned = apiRes.rawText.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();

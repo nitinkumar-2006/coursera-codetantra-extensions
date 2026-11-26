@@ -182,7 +182,7 @@ async function submitPromptDirect(promptText) {
       return /<<<SLOT\s*\d+>>>/i.test(t) || (t.includes("{") && t.includes("}") && (t.includes('"slots"') || t.includes('"edits"') || t.includes('"answers"') || t.includes('"verified"')));
     }).length;
 
-  // Keep chat fast & clean: if current Gemini chat already has >= 4 replies (or forceNewChat), click 'New chat'
+  // Keep chat fast & clean: if current Gemini chat already has >= 4 replies, click 'New chat' in the SAME tab (never spawn a duplicate tab!)
   const initialNodes = getRespNodes();
   if (initialNodes.length >= 4) {
     const newChatBtn = qDeep('a, button, [role="button"]').find((el) => {
@@ -191,6 +191,7 @@ async function submitPromptDirect(promptText) {
       return t === "new chat" || t.startsWith("new chat");
     });
     if (newChatBtn) {
+      if (newChatBtn.tagName === "A") newChatBtn.removeAttribute("target");
       newChatBtn.click();
       await wait(900);
     }
@@ -608,26 +609,56 @@ async function submitChatGptDirect(promptText) {
 
   inputEl.click();
   inputEl.focus();
-  await wait(120);
+  await wait(150);
+  const getCurLen = () =>
+    inputEl.tagName === "TEXTAREA"
+      ? (inputEl.value || "").trim().length
+      : (inputEl.innerText || inputEl.textContent || "").trim().length;
+  const minLen = Math.min(180, Math.floor(promptText.length * 0.4));
+
   if (inputEl.tagName === "TEXTAREA") {
     const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
     if (setter) setter.call(inputEl, promptText);
     else inputEl.value = promptText;
     inputEl.dispatchEvent(new Event("input", { bubbles: true }));
   } else {
+    // Method 1: Native execCommand insertText (works cleanly with ChatGPT ProseMirror!)
     try {
-      const dt = new DataTransfer();
-      dt.setData("text/plain", promptText);
-      inputEl.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: dt }));
+      document.execCommand("selectAll", false, null);
+      document.execCommand("insertText", false, promptText);
     } catch {}
-    await wait(200);
-    if ((inputEl.textContent || "").trim().length < Math.min(200, promptText.length * 0.5)) {
-      inputEl.textContent = promptText;
+    await wait(220);
+    // Method 2: ClipboardEvent paste
+    if (getCurLen() < minLen) {
+      try {
+        const dt = new DataTransfer();
+        dt.setData("text/plain", promptText);
+        inputEl.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: dt }));
+      } catch {}
+      await wait(220);
+    }
+    // Method 3: ProseMirror <p> paragraphs
+    if (getCurLen() < minLen) {
+      while (inputEl.firstChild) inputEl.removeChild(inputEl.firstChild);
+      for (const ln of promptText.replace(/\r\n/g, "\n").split("\n")) {
+        const p = document.createElement("p");
+        if (ln) p.textContent = ln;
+        else p.appendChild(document.createElement("br"));
+        inputEl.appendChild(p);
+      }
       inputEl.dispatchEvent(new InputEvent("input", { bubbles: true, data: promptText, inputType: "insertFromPaste" }));
+      await wait(220);
     }
   }
-  await wait(250);
-  const sendBtn = Array.from(document.querySelectorAll('button[data-testid="send-button"], button[aria-label*="Send" i], button[type="submit"]')).find((b) => isVis(b) && !b.disabled);
+  if (getCurLen() < minLen) {
+    return { ok: false, error: `ChatGPT input box mein prompt paste nahi hua (${getCurLen()}/${promptText.length} chars).` };
+  }
+  let sendBtn = null;
+  for (let i = 0; i < 8; i++) {
+    sendBtn = Array.from(document.querySelectorAll('button[data-testid="send-button"], button[aria-label*="Send prompt" i], button[aria-label*="Send" i]')).find((b) => isVis(b) && !b.disabled);
+    if (sendBtn) break;
+    await wait(200);
+  }
   if (sendBtn) sendBtn.click();
   else inputEl.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
   await wait(700);

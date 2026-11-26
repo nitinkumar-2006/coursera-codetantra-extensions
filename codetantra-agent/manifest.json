@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CodeTantra AI Agent",
-  "version": "11.1",
+  "version": "11.9",
   "description": "CodeTantra AI Agent v11.0: Python indentation & __init__ preservation, Gemini Web + ChatGPT fallback + API toggle, auto-Java/Lang selector, auto-Cancel popups, surgical compiler/test-case diff fixes",
   "permissions": ["activeTab", "tabs", "scripting"],
   "host_permissions": [

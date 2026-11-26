@@ -113,27 +113,44 @@
     return null;
   }
 
+  function hasMultiLangDropdownInDoc(doc) {
+    if (!doc || !doc.body) return false;
+    const win = doc.defaultView || window;
+    const minX = Math.floor((win.innerWidth || 1200) * 0.42);
+    const triggers = Array.from(doc.querySelectorAll("button, [role='button'], select")).filter((el) => {
+      if (el.closest("#ct-helper-panel") || !isVisible(el)) return false;
+      const r = el.getBoundingClientRect();
+      if (r.top >= 220 || r.left < minX || r.width < 22 || r.width >= 165 || r.height < 16 || r.height > 54) return false;
+      const t = (el.innerText || el.textContent || "").replace(/[^a-z0-9+]/gi, "").toLowerCase();
+      return t === "c" || t === "c++" || t === "cpp" || t === "java" || t === "python" || t === "python3";
+    });
+    return triggers.length > 0;
+  }
+
   function detectLanguageFromDoc(doc) {
-    // 1. Check top-right CodeTantra language dropdown button (Java / Python / C++ / C) first!
+    // 1. Check top-right CodeTantra language dropdown button (Java / Python / C++ / C / WebTech) first!
     const topBtns = Array.from(doc.querySelectorAll("button, [role='button'], select")).filter(
       (el) => !el.closest("#ct-helper-panel") && isVisible(el)
     );
     for (const el of topBtns) {
       const r = el.getBoundingClientRect();
-      if (r.top < 170 && r.width < 150) {
+      if (r.top < 170 && r.width < 165) {
         const t = (el.innerText || el.textContent || "").replace(/[^a-z0-9+]/gi, "").toLowerCase();
         if (t === "java") return "java";
         if (t === "python" || t === "python3") return "python";
         if (t === "c++" || t === "cpp") return "cpp";
         if (t === "c") return "c";
+        if (t === "html" || t === "html5") return "html";
+        if (t === "css" || t === "css3") return "css";
+        if (t === "javascript" || t === "js") return "javascript";
       }
     }
 
-    // 2. Check file tab extensions (.java, .py, .c, .cpp) OR truncated CodeTantra prefixes (CTJ... = Java, CTC... = C, CTP... = Python)
+    // 2. Check file tab extensions (.java, .py, .c, .cpp, .html, .css, .js) OR CodeTantra prefixes
     const els = Array.from(doc.querySelectorAll("[role='tab'], .tab, button, span, div"));
     for (const el of els) {
       const t = (el.textContent || "").trim();
-      if (t.length > 0 && t.length < 40 && /\.(py|java|c|cpp|cc|cxx|js|ts|sql|html)$/i.test(t)) {
+      if (t.length > 0 && t.length < 48 && /\.(py|java|c|cpp|cc|cxx|js|jsx|ts|sql|html|htm|css)$/i.test(t)) {
         const ext = t.split(".").pop().toLowerCase();
         const map = {
           py: "python",
@@ -143,8 +160,12 @@
           cc: "cpp",
           cxx: "cpp",
           js: "javascript",
+          jsx: "javascript",
           ts: "typescript",
-          sql: "sql"
+          sql: "sql",
+          html: "html",
+          htm: "html",
+          css: "css"
         };
         if (map[ext]) return map[ext];
       }
@@ -153,6 +174,7 @@
         if (/^CTP\d+/i.test(t)) return "python";
         if (/^CTCPP\d+/i.test(t)) return "cpp";
         if (/^CTC\d+/i.test(t)) return "c";
+        if (/^CTW\d+/i.test(t)) return "html";
       }
     }
     return "";
@@ -689,9 +711,11 @@
     return false;
   }
 
-  // Auto-expand EVERY collapsed FAILED 'Test case N' accordion on the right-side test panel (even if Test case 1 passed & is already open!)
+  // Auto-expand EVERY collapsed FAILED 'Test case N' accordion (Test case 1, 2, 3...) AND collect each one's exact Expected vs Actual diff!
+  // Works even when CodeTantra's accordion closes Test case 1 upon opening Test case 2!
   async function expandFailedTestCasesInDoc(doc) {
-    if (!doc || !doc.body) return;
+    if (!doc || !doc.body) return "";
+    const collectedReports = [];
     try {
       const win = doc.defaultView || window;
       const minRightX = Math.floor((win.innerWidth || 1200) * 0.35);
@@ -726,11 +750,16 @@
         return /^test case\s*\d+\b/i.test(t) && t.length < 40;
       });
       const headers = rawHeaders.filter((el) => !rawHeaders.some((other) => other !== el && el.contains(other)));
+      const seenCaseLabels = new Set();
 
       for (const hdr of headers) {
+        const caseLabel = ((hdr.innerText || hdr.textContent || "").match(/test case\s*\d+/i) || ["Test case"])[0].trim();
+        if (seenCaseLabels.has(caseLabel.toLowerCase())) continue;
+        seenCaseLabels.add(caseLabel.toLowerCase());
+
         // Walk up to this single Test Case's own accordion card (stop before enclosing multiple Test Cases)
         let card = hdr.parentElement || hdr;
-        for (let up = 0; up < 4 && card && card.parentElement && card.parentElement !== doc.body; up++) {
+        for (let up = 0; up < 5 && card && card.parentElement && card.parentElement !== doc.body; up++) {
           const parentTxt = card.parentElement.innerText || "";
           const tcMatches = parentTxt.match(/test case\s*\d+/gi) || [];
           if (tcMatches.length <= 1) {
@@ -741,31 +770,59 @@
         }
 
         const headerRow = hdr.closest("button, [role='button']") || hdr.parentElement || hdr;
-        const { hasRed, hasGreen } = getIconColorFlags(headerRow);
+        const { hasRed, hasGreen } = getIconColorFlags(card);
         // Skip clearly passed (green-only) test cases!
         if (hasGreen && !hasRed) continue;
 
-        const cardTxt = normalizeText(card.innerText || "");
-        const alreadyOpen =
-          (cardTxt.includes("expected output") && cardTxt.includes("actual output")) ||
-          cardTxt.includes("error:") ||
-          cardTxt.includes("exception") ||
-          cardTxt.includes("traceback");
-        if (alreadyOpen && card.getBoundingClientRect().height > 95) continue;
+        const isCardOpenNow = () => {
+          const cTxt = normalizeText(card.innerText || "");
+          return (
+            ((cTxt.includes("expected output") && cTxt.includes("actual output")) ||
+              cTxt.includes("error:") ||
+              cTxt.includes("exception") ||
+              cTxt.includes("traceback") ||
+              cTxt.includes("reading more inputs") ||
+              cTxt.includes("time limit exceeded")) &&
+            card.getBoundingClientRect().height > 95
+          );
+        };
 
-        // Scroll this collapsed failed Test case into view and click it to expand!
-        hdr.scrollIntoView({ behavior: "instant", block: "center" });
-        await sleep(120);
-        dispatchReliableClick(headerRow);
-        if (headerRow !== hdr) dispatchReliableClick(hdr);
-        await sleep(420);
+        if (!isCardOpenNow()) {
+          hdr.scrollIntoView({ behavior: "instant", block: "center" });
+          await sleep(140);
+          // Try clicking the accordion row AND/OR right-side chevron button
+          const chevronBtn = Array.from(headerRow.querySelectorAll("button, [role='button'], svg")).pop();
+          dispatchReliableClick(headerRow);
+          await sleep(420);
+          if (!isCardOpenNow() && chevronBtn && chevronBtn !== headerRow) {
+            dispatchReliableClick(chevronBtn.closest("button, [role='button']") || chevronBtn);
+            await sleep(420);
+          }
+          if (!isCardOpenNow() && headerRow !== hdr) {
+            dispatchReliableClick(hdr);
+            await sleep(420);
+          }
+        }
+
+        // Immediately extract THIS test case's diff while it is expanded (before opening the next one!)
+        const cardDiff = extractExpectedVsActualDiffs(doc, card);
+        if (cardDiff) {
+          collectedReports.push(`=== ${caseLabel} ===\n${cardDiff}`);
+        } else {
+          const rawCard = (card.innerText || "").replace(/\u00B7/g, " ").replace(/\u21B5/g, "").trim();
+          if (rawCard.length > 20) {
+            collectedReports.push(`=== ${caseLabel} ===\n${rawCard.slice(0, 1200)}`);
+          }
+        }
       }
     } catch {}
+    return collectedReports.join("\n\n");
   }
 
-  // Parse CodeTantra's side-by-side 'Expected output' vs 'Actual output' diff (including scrolled-off rows & red-highlighted diffs!)
-  function extractExpectedVsActualDiffs(doc) {
-    if (!doc || !doc.body) return "";
+  // Parse CodeTantra's side-by-side 'Expected output' vs 'Actual output' diff (scoped to a single test-case card or whole doc)
+  function extractExpectedVsActualDiffs(doc, scopeRoot = null) {
+    const root = scopeRoot || doc?.body;
+    if (!doc || !root) return "";
     const win = doc.defaultView || window;
     const minRightX = Math.floor((win.innerWidth || 1200) * 0.35);
     const cleanCell = (str) =>
@@ -785,7 +842,7 @@
         const { exp, act } = rows[i];
         if (exp === act) continue;
         diffCount++;
-        if (diffCount > 18) {
+        if (diffCount > 12) {
           diffLines.push(`... (+more mismatched rows omitted)`);
           break;
         }
@@ -799,7 +856,7 @@
 
     // Strategy 1: Standard <table> containing Expected output / Actual output (read ALL rows, even scrolled-off!)
     try {
-      const tables = Array.from(doc.querySelectorAll("table")).filter((tb) => {
+      const tables = Array.from(root.querySelectorAll("table")).filter((tb) => {
         if (tb.closest('#ct-helper-panel, aside, nav, [class*="sidebar" i]') || !isVisible(tb)) return false;
         const r = tb.getBoundingClientRect();
         if (r.left < minRightX) return false;
@@ -828,7 +885,7 @@
     // Strategy 2: Flex/Grid 2-column div layout under 'Expected output' | 'Actual output' (handles scrolled-off & multi-child rows!)
     if (!diffLines.length) {
       try {
-        const expHeaders = Array.from(doc.querySelectorAll("div, span, th, p")).filter((el) => {
+        const expHeaders = Array.from(root.querySelectorAll("div, span, th, p")).filter((el) => {
           if (el.closest('#ct-helper-panel, aside, nav, [class*="sidebar" i]') || !isVisible(el)) return false;
           const r = el.getBoundingClientRect();
           return r.left >= minRightX && normalizeText(el.innerText || "") === "expected output";
@@ -965,8 +1022,10 @@
       if (shownOk && hiddenOk) {
         return { status: "passed", summary };
       }
-      await expandFailedTestCasesInDoc(doc);
-      return { status: "failed", summary: `${summary}\n${readFailureSnippetFromDoc(doc)}` };
+      const perCaseDiffs = await expandFailedTestCasesInDoc(doc);
+      const extraErr = readFailureSnippetFromDoc(doc);
+      const combined = perCaseDiffs ? `${perCaseDiffs}\n---\n${extraErr}` : extraErr;
+      return { status: "failed", summary: `${summary}\n${combined}`.slice(0, 6200) };
     }
 
     if (genericMatch) {
@@ -975,8 +1034,10 @@
       if (totalNum > 0 && passedNum === totalNum) {
         return { status: "passed", summary: genericMatch[0] };
       }
-      await expandFailedTestCasesInDoc(doc);
-      return { status: "failed", summary: `${genericMatch[0]}\n${readFailureSnippetFromDoc(doc)}` };
+      const perCaseDiffs = await expandFailedTestCasesInDoc(doc);
+      const extraErr = readFailureSnippetFromDoc(doc);
+      const combined = perCaseDiffs ? `${perCaseDiffs}\n---\n${extraErr}` : extraErr;
+      return { status: "failed", summary: `${genericMatch[0]}\n${combined}`.slice(0, 6200) };
     }
 
     // Check explicit compilation/runtime error panels
@@ -1257,16 +1318,28 @@
     const selected = [];
     const usedInputs = new Set();
 
+    const stripDunder = (s) => (s || "").replace(/^_+|_+$/g, "");
+
     for (const ans of answers || []) {
       const target = normalizeText(ans);
       if (!target) continue;
+      const targetCore = stripDunder(target);
 
       let match = mcq.optionRefs.find((o) => !usedInputs.has(o.input) && normalizeText(o.text) === target);
+      if (!match && targetCore) {
+        match = mcq.optionRefs.find((o) => !usedInputs.has(o.input) && stripDunder(normalizeText(o.text)) === targetCore);
+      }
       if (!match && target.length >= 2) {
         match = mcq.optionRefs.find((o) => {
           if (usedInputs.has(o.input)) return false;
           const ot = normalizeText(o.text);
-          return ot === target || (target.length >= 3 && ot.includes(target)) || (ot.length >= 3 && target.includes(ot));
+          const otCore = stripDunder(ot);
+          return (
+            ot === target ||
+            (targetCore.length >= 2 && otCore === targetCore) ||
+            (target.length >= 3 && ot.includes(target)) ||
+            (ot.length >= 3 && target.includes(ot))
+          );
         });
       }
 
@@ -1595,7 +1668,8 @@
     }
 
     const problemText = extractProblemTextFromDoc(ed.doc);
-    return { found: true, type: ed.type, code, language, lockedLines, problemText };
+    const hasMultiLangDropdown = hasMultiLangDropdownInDoc(ed.doc);
+    return { found: true, type: ed.type, code, language, lockedLines, problemText, hasMultiLangDropdown };
   }
 
   function emitProgressToTop(pct, doneChars, totalChars) {
@@ -1667,21 +1741,11 @@
       return { ok: false, error: `Koi safe editable block nahi mila (pink locked lines protected).${getEditableRangesHint()}` };
     }
 
+    // ALWAYS type strictly 1 character per CM6 dispatch!
+    // CodeTantra's CodeMirror 6 has an anti-paste transactionFilter that silently rejects any multi-character insert (piece.length > 1),
+    // which caused 95% of code to drop and left random single chars like 'd', ')', ':'.
     const totalChars = Math.max(1, sortedEdits.reduce((sum, e) => sum + (e.code || "").length, 0));
-    // Accurate typing speed scaling across the full 1s-60s Speed Grid (from 2s Turbo to 60s Human!)
-    const chunkSize =
-      targetTotalMs <= 3500
-        ? Math.max(6, Math.ceil(totalChars / 110))
-        : totalChars > 1000
-        ? 5
-        : totalChars > 500
-        ? 3
-        : totalChars > 220
-        ? 2
-        : 1;
-    const totalSteps = Math.max(1, Math.ceil(totalChars / chunkSize));
-    const baseStepMs = Math.max(4, Math.min(250, Math.floor((targetTotalMs * 0.85) / totalSteps)));
-    const baseCharMs = baseStepMs;
+    const baseCharMs = Math.max(3, Math.min(90, Math.floor((targetTotalMs * 0.85) / totalChars)));
     let doneChars = 0;
 
     if (view && view.state && typeof view.dispatch === "function") {
@@ -1708,7 +1772,7 @@
 
         if (to > from) {
           const beforeDelLen = view.state.doc.length;
-          view.dispatch({ changes: { from, to, insert: "" }, selection: { anchor: from }, scrollIntoView: true });
+          view.dispatch({ changes: { from, to, insert: "" }, selection: { anchor: from }, userEvent: "delete.selection", scrollIntoView: true });
           await sleep(randMs(70, 140));
 
           // If CodeTantra's CM6 readOnly filter silently rejected the whole-range delete,
@@ -1729,7 +1793,7 @@
                 continue;
               }
               const lenBefore = view.state.doc.length;
-              view.dispatch({ changes: { from: delFrom, to: delTo, insert: "" } });
+              view.dispatch({ changes: { from: delFrom, to: delTo, insert: "" }, userEvent: "delete.selection" });
               if (view.state.doc.length < lenBefore) {
                 clearedAny = true;
                 firstEditableFrom = delFrom;
@@ -1745,29 +1809,117 @@
 
         const text = (edit.code || "").replace(/\r\n/g, "\n");
         let cursor = Math.max(0, Math.min(from, view.state.doc.length));
+        let acceptedChars = 0;
+        // Auto-detected winning strategy: "dispatch" -> "exec" -> "unfiltered"
+        let typingMode = "dispatch";
 
-        for (let i = 0; i < text.length; i += chunkSize) {
+        function placeDomCaretAt(pos) {
+          try {
+            const safeP = Math.max(0, Math.min(pos, view.state.doc.length));
+            view.focus();
+            view.dispatch({ selection: { anchor: safeP }, scrollIntoView: true });
+            ed.contentEl?.focus();
+            if (typeof view.domAtPos === "function") {
+              const domPos = view.domAtPos(safeP);
+              if (domPos && domPos.node) {
+                const sel = ed.win.getSelection();
+                const range = ed.doc.createRange();
+                range.setStart(domPos.node, domPos.offset);
+                range.collapse(true);
+                sel.removeAllRanges();
+                sel.addRange(range);
+              }
+            }
+          } catch {}
+        }
+
+        async function insertCharExec(pos, ch) {
+          const safeP = Math.max(0, Math.min(pos, view.state.doc.length));
+          const beforeLen = view.state.doc.length;
+          try {
+            placeDomCaretAt(safeP);
+            ed.contentEl?.dispatchEvent(new KeyboardEvent("keydown", { key: ch === "\n" ? "Enter" : ch === "\t" ? "Tab" : ch, bubbles: true, cancelable: true }));
+            ed.doc.execCommand("insertText", false, ch);
+            ed.contentEl?.dispatchEvent(new KeyboardEvent("keyup", { key: ch === "\n" ? "Enter" : ch === "\t" ? "Tab" : ch, bubbles: true }));
+          } catch {}
+          // Wait for CodeMirror 6's MutationObserver to flush DOM edit into view.state.doc!
+          await sleep(14);
+          return Math.max(0, view.state.doc.length - beforeLen);
+        }
+
+        function insertCharDispatch(pos, ch, bypassFilter = false) {
+          const safeP = Math.max(0, Math.min(pos, view.state.doc.length));
+          const beforeLen = view.state.doc.length;
+          const spec = {
+            changes: { from: safeP, to: safeP, insert: ch },
+            selection: { anchor: safeP + ch.length },
+            userEvent: "input.type",
+            scrollIntoView: true
+          };
+          if (bypassFilter) spec.filter = false;
+          try {
+            view.dispatch(spec);
+          } catch {}
+          return Math.max(0, view.state.doc.length - beforeLen);
+        }
+
+        for (let i = 0; i < text.length; i++) {
           if (stopTypingFlag || sessionId !== activeTypingSessionId) {
             return { ok: false, error: "Typing stopped by user." };
           }
-          const piece = text.slice(i, i + chunkSize);
+          const ch = text[i];
           const safePos = Math.max(0, Math.min(cursor, view.state.doc.length));
-          const prevDocLen = view.state.doc.length;
-          view.dispatch({
-            changes: { from: safePos, to: safePos, insert: piece },
-            selection: { anchor: safePos + piece.length },
-            scrollIntoView: true
-          });
-          const actualInserted = Math.max(0, view.state.doc.length - prevDocLen);
+          let actualInserted = 0;
+
+          if (typingMode === "dispatch") {
+            actualInserted = insertCharDispatch(safePos, ch, false);
+            if (actualInserted === 0) {
+              actualInserted = await insertCharExec(safePos, ch);
+              if (actualInserted > 0 && ch !== "\n" && ch !== "\t") typingMode = "exec";
+            }
+            if (actualInserted === 0) {
+              actualInserted = insertCharDispatch(safePos, ch, true);
+              if (actualInserted > 0 && ch !== "\n" && ch !== "\t") typingMode = "unfiltered";
+            }
+          } else if (typingMode === "exec") {
+            actualInserted = await insertCharExec(safePos, ch);
+            if (actualInserted === 0) {
+              actualInserted = insertCharDispatch(safePos, ch, true);
+              if (actualInserted > 0 && ch !== "\n" && ch !== "\t") typingMode = "unfiltered";
+            }
+          } else {
+            actualInserted = insertCharDispatch(safePos, ch, true);
+          }
+
+          // If CM6 rejected '\t' at this position, fall back to 4 single-space inserts
+          if (actualInserted === 0 && ch === "\t") {
+            let spPos = safePos;
+            for (let s = 0; s < 4; s++) {
+              let got = typingMode === "exec" ? await insertCharExec(spPos, " ") : insertCharDispatch(spPos, " ", typingMode === "unfiltered");
+              if (got === 0) got = insertCharDispatch(spPos, " ", true);
+              spPos += got;
+              actualInserted += got;
+            }
+          }
+
+          if (actualInserted > 0) acceptedChars++;
           cursor = safePos + actualInserted;
-          doneChars += piece.length;
-          if (doneChars % 12 < chunkSize || doneChars >= totalChars) {
+          doneChars++;
+          if (doneChars % 12 === 0 || doneChars >= totalChars) {
             emitProgressToTop(Math.min(100, Math.round((doneChars / totalChars) * 100)), doneChars, totalChars);
           }
 
-          let delay = randMs(Math.floor(baseStepMs * 0.7), Math.floor(baseStepMs * 1.3));
-          if (piece.includes("\n")) delay += randMs(12, 30);
+          let delay = randMs(Math.floor(baseCharMs * 0.7), Math.floor(baseCharMs * 1.3));
+          if (ch === "\n") delay += randMs(8, 20);
           await sleep(delay);
+        }
+
+        // Integrity check: never silently succeed if CodeTantra's CM6 filter dropped the code!
+        if (text.length > 15 && acceptedChars < Math.floor(text.length * 0.8)) {
+          return {
+            ok: false,
+            error: `CodeTantra editor ne typing block kar di (sirf ${acceptedChars}/${text.length} chars accept hue).`
+          };
         }
 
         const newLineCount = text.split("\n").length;
@@ -2158,7 +2310,7 @@
           window.postMessage({ source: "CT_BRIDGE", id, type: "EVAL_TESTS_RES", payload: evalRes }, "*");
           return;
         }
-        const remote = await askChildFrames(id, "EVAL_TESTS", {}, 6500);
+        const remote = await askChildFrames(id, "EVAL_TESTS", {}, 11000);
         window.postMessage(
           { source: "CT_BRIDGE", id, type: "EVAL_TESTS_RES", payload: remote || (await evaluateTestResultsInDoc(document)) },
           "*"
