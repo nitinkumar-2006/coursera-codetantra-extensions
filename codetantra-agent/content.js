@@ -45,7 +45,7 @@ let failedModelUntil = new Map();
 let apiCooldownUntil = 0;
 
 const RETRYABLE_HTTP_CODES = new Set([400, 403, 404, 408, 429, 500, 502, 503, 504]);
-const MAX_FIX_ATTEMPTS = 6;
+const MAX_FIX_ATTEMPTS = 20;
 
 let autoMode = false;
 let autoInterval = null;
@@ -314,7 +314,7 @@ function createPanel() {
     <div style="font-weight: 600; margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center; gap:6px;">
       <span style="display:flex; align-items:center; gap:5px; flex-wrap:nowrap;">
         <span style="color:#ffffff; white-space:nowrap; font-size:13px;">CodeTantra</span>
-        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v15.1</span>
+        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v15.5</span>
         <button id="ct-mode-btn" class="ct-icon-btn ct-mode-active" title="Active AI Mode (click to toggle Web / API)">Web</button>
       </span>
       <span style="display:flex; align-items:center; gap:6px;">
@@ -740,7 +740,7 @@ async function callChatGptWeb(prompt) {
       let done = false;
       const finish = (v) => { if (!done) { done = true; clearTimeout(t); resolve(v); } };
       const t = setTimeout(() => finish({ ok: false, error: "ChatGPT Web timeout (100s)." }), 100000);
-      chrome.runtime.sendMessage({ type: "CHATGPT_WEB_ASK", prompt }, (reply) => {
+      chrome.runtime.sendMessage({ type: "CHATGPT_WEB_ASK", prompt, questionUrl: window.location.href }, (reply) => {
         if (chrome.runtime.lastError) finish({ ok: false, error: chrome.runtime.lastError.message });
         else finish(reply || { ok: false, error: "ChatGPT worker se reply nahi mila." });
       });
@@ -791,7 +791,7 @@ async function callGemini(prompt, { expectJson = true, useChatGptFallback = fals
         let done = false;
         const finish = (v) => { if (!done) { done = true; clearTimeout(t); resolve(v); } };
         const t = setTimeout(() => finish({ ok: false, error: "Gemini Web timeout (130s) — Gemini tab mein 'Neon' se 'Fast' par switch karo ya 'API' mode chalao." }), 130000);
-        chrome.runtime.sendMessage({ type: "GEMINI_WEB_ASK", prompt, screenshot }, (reply) => {
+        chrome.runtime.sendMessage({ type: "GEMINI_WEB_ASK", prompt, screenshot, questionUrl: window.location.href }, (reply) => {
           if (chrome.runtime.lastError) {
             finish({ ok: false, error: chrome.runtime.lastError.message });
           } else {
@@ -1433,6 +1433,25 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
           `CRITICAL PYTHON INDENTATION ERROR at Line ${badIndentLine}: Line ${badIndentLine} MUST be indented deeper than the ':' header above it! Wrap your ENTIRE <<<SLOT N>>> output inside triple backticks with exact indentation!`;
         setStatus(`Indent retry (${attempt})...`, "#facc15");
         setOutput(`Line ${badIndentLine} par Python indentation missing thi — dobara sahi indentation maang raha hoon...`);
+        continue;
+      }
+    }
+
+    // JAVA / C / C++ BRACE-BALANCE GUARD: Catch missing '}' before typing so next [LOCKED] method never gets 'illegal start of expression'!
+    if (/java|cpp|c\b/i.test(lang || "") && attempt < MAX_FIX_ATTEMPTS) {
+      const stripped = assembledPreview
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\/\/.*$/gm, "")
+        .replace(/"(?:\\.|[^"\\])*"/g, '""')
+        .replace(/'(?:\\.|[^'\\])*'/g, "''");
+      const opens = (stripped.match(/\{/g) || []).length;
+      const closes = (stripped.match(/\}/g) || []).length;
+      if (opens !== closes) {
+        previousError =
+          (previousError ? previousError + "\n" : "") +
+          `CRITICAL BRACE MISMATCH: Assembled code has ${opens} '{' vs ${closes} '}'! Close every method/if/else block properly with '}' before the next [LOCKED] line.`;
+        setStatus(`Brace retry (${attempt})...`, "#facc15");
+        setOutput(`Java/C brace mismatch (${opens} '{' vs ${closes} '}') — Submit nahi kar raha, AI se fix maang raha hoon...`);
         continue;
       }
     }

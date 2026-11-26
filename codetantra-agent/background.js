@@ -76,7 +76,7 @@ async function getOrCreateGeminiTab() {
 }
 
 // Executed directly inside https://gemini.google.com/* via chrome.scripting.executeScript
-async function submitPromptDirect(promptText, screenshot = null) {
+async function submitPromptDirect(promptText, screenshot = null, isNewQuestion = true) {
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const isVis = (el) => {
     if (!el) return false;
@@ -182,9 +182,9 @@ async function submitPromptDirect(promptText, screenshot = null) {
       return /<<<SLOT\s*\d+>>>/i.test(t) || (t.includes("{") && t.includes("}") && (t.includes('"slots"') || t.includes('"edits"') || t.includes('"answers"') || t.includes('"verified"')));
     }).length;
 
-  // Keep chat fast & clean: if current Gemini chat already has >= 4 replies, click 'New chat' in the SAME tab (never spawn a duplicate tab!)
+  // Keep SAME chat for all retries of the SAME question; only click 'New chat' when moving to a brand-new CodeTantra question!
   const initialNodes = getRespNodes();
-  if (initialNodes.length >= 4) {
+  if (isNewQuestion && initialNodes.length >= 2) {
     const newChatBtn = qDeep('a, button, [role="button"]').find((el) => {
       if (!isVis(el)) return false;
       const t = (el.innerText || el.getAttribute("aria-label") || "").trim().toLowerCase();
@@ -459,12 +459,17 @@ function pollResponseDirect(beforeCount, beforeLastText, beforeJsonCount) {
   return { ok: true, hasNew: false, isNewNode: false, generating, text: "" };
 }
 
-async function askGeminiWebTab(prompt, callerTabId, screenshot = null) {
+let lastGeminiQuestionUrl = "";
+
+async function askGeminiWebTab(prompt, callerTabId, screenshot = null, questionUrl = "") {
   const keepAlive = setInterval(() => {
     try {
       chrome.runtime.getPlatformInfo(() => {});
     } catch {}
   }, 15000);
+
+  const isNewQuestion = Boolean(questionUrl && lastGeminiQuestionUrl && questionUrl !== lastGeminiQuestionUrl);
+  if (questionUrl) lastGeminiQuestionUrl = questionUrl;
 
   let switchedToGemini = false;
   try {
@@ -485,7 +490,7 @@ async function askGeminiWebTab(prompt, callerTabId, screenshot = null) {
         chrome.scripting.executeScript({
           target: { tabId: tab.id },
           func: submitPromptDirect,
-          args: [prompt, screenshot]
+          args: [prompt, screenshot, isNewQuestion]
         }),
         25000,
         "submitPromptDirect"
@@ -595,7 +600,7 @@ async function getOrCreateChatGptTab() {
   return created;
 }
 
-async function submitChatGptDirect(promptText) {
+async function submitChatGptDirect(promptText, isNewQuestion = true) {
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const isVis = (el) => {
     if (!el) return false;
@@ -613,6 +618,21 @@ async function submitChatGptDirect(promptText) {
     return null;
   };
   const getNodes = () => Array.from(document.querySelectorAll('[data-message-author-role="assistant"]')).filter((n) => (n.textContent || "").trim().length > 0);
+
+  // Start fresh New Chat only when switching to a new CodeTantra question (keep same ChatGPT thread on retries!)
+  if (isNewQuestion && (getNodes().length > 0 || /\/c\//.test(location.pathname))) {
+    const newChatBtn = Array.from(document.querySelectorAll('a[href="/"], button[aria-label*="New chat" i], a, button')).find((el) => {
+      if (!isVis(el)) return false;
+      const meta = (el.innerText || el.getAttribute("aria-label") || "").trim().toLowerCase();
+      return meta === "new chat" || meta.startsWith("new chat") || el.getAttribute("href") === "/";
+    });
+    if (newChatBtn) {
+      if (newChatBtn.tagName === "A") newChatBtn.removeAttribute("target");
+      newChatBtn.click();
+      await wait(900);
+    }
+  }
+
   let inputEl = null;
   for (let i = 0; i < 12; i++) {
     inputEl = findInput();
@@ -671,15 +691,53 @@ async function submitChatGptDirect(promptText) {
   if (getCurLen() < minLen) {
     return { ok: false, error: `ChatGPT input box mein prompt paste nahi hua (${getCurLen()}/${promptText.length} chars).` };
   }
+  const findChatGptSend = () => {
+    const direct = Array.from(
+      document.querySelectorAll(
+        'button#composer-submit-button, button[data-testid="send-button"], button[aria-label*="Send prompt" i], button[aria-label*="Send message" i], button[aria-label="Send" i], form button[type="submit"]'
+      )
+    ).find((b) => isVis(b) && !b.disabled && b.getAttribute("aria-disabled") !== "true");
+    if (direct) return direct;
+    const form = inputEl.closest("form");
+    if (form) {
+      const btns = Array.from(form.querySelectorAll("button")).filter((b) => {
+        if (!isVis(b) || b.disabled || b.getAttribute("aria-disabled") === "true") return false;
+        const meta = (b.getAttribute("aria-label") || b.innerText || "").toLowerCase();
+        return !/(attach|upload|plus|add|mic|voice|think|search|reason|stop)/i.test(meta);
+      });
+      if (btns.length) return btns[btns.length - 1];
+    }
+    return null;
+  };
+  const clickReal = (el) => {
+    try {
+      el.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
+      el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+      el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+    } catch {}
+    el.click();
+  };
   let sendBtn = null;
-  for (let i = 0; i < 8; i++) {
-    sendBtn = Array.from(document.querySelectorAll('button[data-testid="send-button"], button[aria-label*="Send prompt" i], button[aria-label*="Send" i]')).find((b) => isVis(b) && !b.disabled);
+  for (let i = 0; i < 10; i++) {
+    sendBtn = findChatGptSend();
     if (sendBtn) break;
     await wait(200);
   }
-  if (sendBtn) sendBtn.click();
-  else inputEl.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, bubbles: true }));
+  if (sendBtn) {
+    clickReal(sendBtn);
+  } else {
+    inputEl.focus();
+    inputEl.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+  }
   await wait(700);
+  if (getCurLen() > 25) {
+    const retryBtn = findChatGptSend();
+    if (retryBtn) clickReal(retryBtn);
+    inputEl.focus();
+    inputEl.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+    try { inputEl.closest("form")?.requestSubmit?.(); } catch {}
+    await wait(500);
+  }
   return { ok: true, beforeCount, beforeLastText };
 }
 
@@ -690,7 +748,7 @@ function pollChatGptDirect(beforeCount, beforeLastText) {
     nodes = Array.from(document.querySelectorAll('article[data-testid^="conversation-turn-"] .markdown')).filter((n) => (n.textContent || "").trim().length > 0);
   }
   const hasNewNode = nodes.length > beforeCount;
-  const latest = nodes.length ? nodes[nodes.length - 1] : null;
+  const latest = hasNewNode ? nodes[nodes.length - 1] : null;
   let text = "";
   if (latest) {
     const blocks = Array.from(latest.querySelectorAll("pre code, pre"));
@@ -707,10 +765,14 @@ function pollChatGptDirect(beforeCount, beforeLastText) {
       } else text = full;
     }
   }
-  return { ok: true, hasNew: hasNewNode || (Boolean(text) && text !== beforeLastText), isNewNode: hasNewNode, generating, text };
+  return { ok: true, hasNew: hasNewNode && Boolean(text), isNewNode: hasNewNode, generating, text };
 }
 
-async function askChatGptWebTab(prompt, callerTabId) {
+let lastChatGptQuestionUrl = "";
+
+async function askChatGptWebTab(prompt, callerTabId, questionUrl = "") {
+  const isNewQuestion = Boolean(!lastChatGptQuestionUrl || (questionUrl && questionUrl !== lastChatGptQuestionUrl));
+  if (questionUrl) lastChatGptQuestionUrl = questionUrl;
   let switched = false;
   try {
     notifyProgress(callerTabId, "Fallback: ChatGPT (chatgpt.com) se second-opinion le raha hoon...");
@@ -719,7 +781,7 @@ async function askChatGptWebTab(prompt, callerTabId) {
     await withTimeout(chrome.tabs.update(tab.id, { active: true }), 3000, "tabs.update");
     switched = true;
     await sleep(300);
-    const subArr = await withTimeout(chrome.scripting.executeScript({ target: { tabId: tab.id }, func: submitChatGptDirect, args: [prompt] }), 12000, "submitChatGptDirect");
+    const subArr = await withTimeout(chrome.scripting.executeScript({ target: { tabId: tab.id }, func: submitChatGptDirect, args: [prompt, isNewQuestion] }), 14000, "submitChatGptDirect");
     const subRes = subArr?.[0]?.result;
     if (!subRes || !subRes.ok) return { ok: false, error: subRes?.error || "ChatGPT submit failed." };
     const { beforeCount = 0, beforeLastText = "" } = subRes;
@@ -783,13 +845,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg.type === "GEMINI_WEB_ASK") {
-    askGeminiWebTab(msg.prompt || "", sender?.tab?.id, msg.screenshot || null)
+    askGeminiWebTab(msg.prompt || "", sender?.tab?.id, msg.screenshot || null, msg.questionUrl || "")
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
     return true;
   }
   if (msg.type === "CHATGPT_WEB_ASK") {
-    askChatGptWebTab(msg.prompt || "", sender?.tab?.id)
+    askChatGptWebTab(msg.prompt || "", sender?.tab?.id, msg.questionUrl || "")
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
     return true;

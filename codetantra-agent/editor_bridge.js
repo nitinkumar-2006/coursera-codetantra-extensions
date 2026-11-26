@@ -1027,7 +1027,7 @@
       for (const h of headings) {
         let bestText = "";
         let box = h.parentElement;
-        for (let up = 0; up < 6 && box && box !== doc.body; up++) {
+        for (let up = 0; up < 8 && box && box !== doc.body; up++) {
           const r = box.getBoundingClientRect();
           const t = (box.innerText || "").trim();
           const low = normalizeText(t);
@@ -1041,7 +1041,7 @@
           if (t.length > bestText.length) bestText = t;
           box = box.parentElement;
         }
-        if (bestText.length > 20) {
+        if (bestText.length > 40 || /line no:|error in |exception|syntaxerror|indentationerror|illegal|expected|cannot/i.test(bestText)) {
           return `COMPILATION / RUNTIME ERROR:\n${bestText}`;
         }
       }
@@ -1141,15 +1141,15 @@
         .querySelectorAll('#ct-helper-panel, .cm-editor, .ace_editor, aside, nav, header, .navbar, [class*="sidebar" i], [class*="drawer" i], [class*="toc" i], script, style')
         .forEach((el) => el.remove());
       const lines = (clone.innerText || "").split("\n").map((l) => l.trim()).filter(Boolean);
-      const errLines = lines.filter(
-        (l) =>
-          !isTocNoise(l) &&
-          /(compilation error|error in .*line no:|error:|caused by:|exception|wrong name:|cannot be applied to|cannot find symbol|incompatible types|expected|traceback|syntaxerror|indentationerror|output mismatch|reading more inputs|time limit exceeded|out of \d+ .*test case)/i.test(l)
-      );
-      for (const eline of errLines) {
-        if (!seen.has(eline)) {
-          seen.add(eline);
-          unique.push(eline);
+      for (let li = 0; li < lines.length; li++) {
+        const l = lines[li];
+        if (isTocNoise(l)) continue;
+        if (/(compilation error|error in .*line no:|error:|caused by:|exception|wrong name:|cannot be applied to|cannot find symbol|incompatible types|illegal start|expected|traceback|syntaxerror|indentationerror|output mismatch|reading more inputs|time limit exceeded|out of \d+ .*test case)/i.test(l)) {
+          const block = lines.slice(li, Math.min(lines.length, li + 4)).filter((x) => !isTocNoise(x)).join("\n");
+          if (block && !seen.has(block)) {
+            seen.add(block);
+            unique.push(block);
+          }
         }
       }
     } catch {}
@@ -1651,19 +1651,36 @@
           cls.includes("locked") ||
           Boolean(el.querySelector('[class*="readOnly" i], [class*="locked" i]'));
 
-        // INLINE FILL-IN-THE-BLANK CHECK (e.g. "[PINK]with[WHITE]       [PINK]as file:"):
-        // If a line does NOT have a full-line pink background, check whether it has an editable non-pink gap between pink spans!
+        // INLINE FILL-IN-THE-BLANK CHECK (STRICT: e.g. "[PINK]with[WHITE 3+ spaces][PINK]as file:"):
+        // Must have pink spans BOTH before and after a non-pink whitespace gap of 3+ spaces — NEVER trigger on '} else {' or indentation!
         let hasEditableInlineGap = false;
-        if (!hasPinkBg && hasPinkChild) {
+        const fullLineTxt = (el.textContent || "").replace(/\u200B/g, "").replace(/\u00A0/g, " ");
+        if (!hasPinkBg && hasPinkChild && !/^\s*(\/\/|\/\*|#)/.test(fullLineTxt) && /\S\s{3,}\S/.test(fullLineTxt)) {
+          let seenPinkBefore = false;
+          let gapCharsAfterPink = 0;
           for (const node of Array.from(el.childNodes)) {
-            const txt = (node.textContent || "").replace(/\u200B/g, "");
+            const txt = (node.textContent || "").replace(/\u200B/g, "").replace(/\u00A0/g, " ");
             if (!txt) continue;
-            if (node.nodeType === 3) {
-              if (txt.length >= 2) { hasEditableInlineGap = true; break; }
-            } else if (node.nodeType === 1) {
+            let nodeIsPink = false;
+            if (node.nodeType === 1) {
               const nBg = ed.win.getComputedStyle(node).backgroundColor || "";
-              const childHasPink = isPinkLockedBg(nBg) || Array.from(node.querySelectorAll("span")).some((s) => isPinkLockedBg(ed.win.getComputedStyle(s).backgroundColor || ""));
-              if (!childHasPink && txt.length >= 2) { hasEditableInlineGap = true; break; }
+              nodeIsPink =
+                isPinkLockedBg(nBg) ||
+                Array.from(node.querySelectorAll("span")).some((s) =>
+                  isPinkLockedBg(ed.win.getComputedStyle(s).backgroundColor || "")
+                );
+            }
+            if (nodeIsPink && txt.trim().length > 0) {
+              if (seenPinkBefore && gapCharsAfterPink >= 3) {
+                hasEditableInlineGap = true;
+                break;
+              }
+              seenPinkBefore = true;
+              gapCharsAfterPink = 0;
+            } else if (seenPinkBefore && /^[ \t]+$/.test(txt)) {
+              gapCharsAfterPink += txt.length;
+            } else if (seenPinkBefore && txt.trim().length > 0) {
+              gapCharsAfterPink = 0;
             }
           }
         }
@@ -1852,7 +1869,7 @@
           // Trim identical prefix & suffix characters so pink locked tokens on the SAME line are NEVER touched!
           const existingSlice = doc.sliceString(from, to);
           if (adjStart === adjEnd) {
-            const gapMatch = existingSlice.match(/^(\S+\s)\s{2,}(\s*\S.*)$/);
+            const gapMatch = existingSlice.match(/^([ \t]*\S+\s)\s{2,}(\s*\S.*)$/);
             if (gapMatch && !text.trim().startsWith(gapMatch[1].trim())) {
               const suf = gapMatch[2].startsWith(" ") ? gapMatch[2] : " " + gapMatch[2];
               text = gapMatch[1] + text.trim() + suf;
@@ -1927,10 +1944,11 @@
             ed.contentEl?.focus();
             if (typeof view.domAtPos === "function") {
               const domPos = view.domAtPos(safeP);
-              if (domPos && domPos.node) {
+              if (domPos && domPos.node && domPos.node.isConnected && ed.doc.contains(domPos.node)) {
                 const sel = ed.win.getSelection();
                 const range = ed.doc.createRange();
-                range.setStart(domPos.node, domPos.offset);
+                const maxOff = domPos.node.nodeType === 3 ? (domPos.node.nodeValue || "").length : domPos.node.childNodes.length;
+                range.setStart(domPos.node, Math.max(0, Math.min(domPos.offset || 0, maxOff)));
                 range.collapse(true);
                 sel.removeAllRanges();
                 sel.addRange(range);
