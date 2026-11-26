@@ -1557,11 +1557,11 @@
     if (!doc) return false;
 
     const isClickableBtn = (el) => {
-      if (
-        el.closest(
-          '#ct-helper-panel, header, nav, aside, .navbar, [class*="sidebar" i], [class*="drawer" i], [class*="toc" i]'
-        )
-      ) {
+      if (el.closest('#ct-helper-panel, header, aside, [class*="sidebar" i], [class*="drawer" i], [class*="toc" i]')) {
+        return false;
+      }
+      const winH = (doc.defaultView || window).innerHeight || 900;
+      if (el.closest('nav, .navbar') && el.getBoundingClientRect().top < winH - 130) {
         return false;
       }
       if (el.disabled || el.getAttribute("aria-disabled") === "true") return false;
@@ -1873,6 +1873,14 @@
           const beforeDelLen = view.state.doc.length;
           view.dispatch({ changes: { from, to, insert: "" }, selection: { anchor: from }, userEvent: "delete.selection", scrollIntoView: true });
           await sleep(randMs(70, 140));
+
+          // If trimmed strictly inside an [INLINE_BLANK] gap (p > 0 || s > 0) and CM6 filter blocked delete, bypass filter safely for that gap!
+          if (view.state.doc.length === beforeDelLen && edit.mode === "replace_lines" && edit.start_line === edit.end_line) {
+            try {
+              view.dispatch({ changes: { from, to, insert: "" }, selection: { anchor: from }, filter: false, scrollIntoView: true });
+              await sleep(60);
+            } catch {}
+          }
 
           // If CodeTantra's CM6 readOnly filter silently rejected the whole-range delete,
           // clear line-by-line from bottom to top so any hidden read-only boundary line is skipped cleanly

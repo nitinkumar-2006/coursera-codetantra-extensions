@@ -240,7 +240,7 @@ async function submitPromptDirect(promptText, screenshot = null) {
     } catch {}
     await wait(80);
 
-    // Attach live screenshot directly to Gemini Web chat box when provided!
+    // Attach live screenshot directly to Gemini Web chat box via drop + paste when provided!
     if (screenshot && screenshot.base64) {
       try {
         const bin = atob(screenshot.base64);
@@ -249,10 +249,12 @@ async function submitPromptDirect(promptText, screenshot = null) {
         const imgFile = new File([bytes], "codetantra_error.jpg", { type: screenshot.mimeType || "image/jpeg" });
         const imgDt = new DataTransfer();
         imgDt.items.add(imgFile);
-        inputEl.dispatchEvent(
-          new ClipboardEvent("paste", { bubbles: true, cancelable: true, composed: true, clipboardData: imgDt })
-        );
-        await wait(1100);
+        const dropTarget = inputEl.closest("rich-textarea") || inputEl.parentElement || inputEl;
+        dropTarget.dispatchEvent(new DragEvent("dragenter", { bubbles: true, cancelable: true, composed: true, dataTransfer: imgDt }));
+        dropTarget.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, composed: true, dataTransfer: imgDt }));
+        dropTarget.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, composed: true, dataTransfer: imgDt }));
+        inputEl.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, composed: true, clipboardData: imgDt }));
+        await wait(1000);
       } catch {}
     }
 
@@ -683,7 +685,10 @@ async function submitChatGptDirect(promptText) {
 
 function pollChatGptDirect(beforeCount, beforeLastText) {
   const generating = Boolean(document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop" i]'));
-  const nodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]')).filter((n) => (n.textContent || "").trim().length > 0);
+  let nodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]')).filter((n) => (n.textContent || "").trim().length > 0);
+  if (!nodes.length) {
+    nodes = Array.from(document.querySelectorAll('article[data-testid^="conversation-turn-"] .markdown')).filter((n) => (n.textContent || "").trim().length > 0);
+  }
   const hasNewNode = nodes.length > beforeCount;
   const latest = nodes.length ? nodes[nodes.length - 1] : null;
   let text = "";

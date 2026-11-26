@@ -314,7 +314,7 @@ function createPanel() {
     <div style="font-weight: 600; margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center; gap:6px;">
       <span style="display:flex; align-items:center; gap:5px; flex-wrap:nowrap;">
         <span style="color:#ffffff; white-space:nowrap; font-size:13px;">CodeTantra</span>
-        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v14.1</span>
+        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v15.1</span>
         <button id="ct-mode-btn" class="ct-icon-btn ct-mode-active" title="Active AI Mode (click to toggle Web / API)">Web</button>
       </span>
       <span style="display:flex; align-items:center; gap:6px;">
@@ -1181,35 +1181,10 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
       ? editableSlots.map((s) => `Slot ${s.id}: Lines ${s.start_line}-${s.end_line}`).join(", ")
       : "Slot 1: Full file";
 
-    const prompt = `You are a senior software engineer helping me fix and solve a CodeTantra coding problem (${lang}).
-
-${previousError ? `I just ran the current code below in CodeTantra and got these EXACT errors / failed test-case diffs (from Test case 1, 2, 3...):\n${previousError}\n${errRequiredPkg ? `MANDATORY: Line 1 MUST have '${errRequiredPkg}' and the main class MUST be '${errRequiredClass}'!\n` : ""}Please inspect EVERY failed test case above (including exact spacing, decimal/float formatting like 25000.5 vs 25000.50, dots, newlines, line numbers, symbol/method names, and every method called by [LOCKED] lines). Fix ONLY the exact cause so it compiles cleanly and passes ALL test cases.\n\n` : ""}Detected Language: ${lang}
-Editable Slots to fill/fix: ${slotGuide}
-
-Problem Statement & Sample Test Cases:
-${problemText}
-
-Current Code in Editor (ONLY the code inside <<< EDITABLE SLOT N >>> ... <<< END SLOT N >>> can be changed; NEVER repeat or modify [LOCKED] lines):
-${slottedCode}
-
-OUTPUT FORMAT — DO NOT USE JSON! Wrap your ENTIRE reply inside ONE fenced code block (triple backticks) so exact Python indentation and __init__ underscores are NEVER stripped:
-\`\`\`text
-<<<SLOT 1>>>
-...complete compiling replacement code for EDITABLE SLOT 1 ONLY (NO [LOCKED] lines, exact indentation)...
-<<<END_SLOT 1>>>
-\`\`\`
-
-Strict Rules:
-- Write ONLY in ${lang}!
-- Do NOT output <<<SLOT N>>> for slots that only contain comments or need no changes.
-- CRITICAL FOR [INLINE_BLANK] LINES: If a line is tagged [INLINE_BLANK ...], you MUST complete the statement INSIDE that exact line by replacing only the blank gap (for example, turning 'with       as file:' into 'with open(filename, \"r\") as file:'). NEVER write that statement on an empty [EDITABLE] line above it!
-- CRITICAL FOR PYTHON: ALWAYS wrap your <<<SLOT N>>> output inside triple backticks so indentation and double underscores (__init__, __str__) are 100% preserved! Every method inside a class MUST be indented 1 level (4 spaces or 1 tab), and every statement inside a method/if/for MUST be indented +1 level!
-- Format code cleanly on multiple lines with proper indentation (NEVER put multiple statements on a single line!).
-- Read the EXACT input format specified in the Problem Statement (e.g., read 'int n = sc.nextInt();' first, then 'for (int i = 0; i < n; i++)' — NEVER use 'while (sc.hasNextInt())' when 'n' is given, or CodeTantra will fail with "reading more inputs than expected"!).
-- Return COMPLETE, compiling, balanced-braces code for EVERY <<< EDITABLE SLOT N >>> that needs code or fixes.
-- Do NOT include any [LOCKED] lines inside <<<SLOT N>>> ... <<<END_SLOT N>>>!
-- Match Sample Test Cases & Expected vs Actual output character-for-character (spaces, decimals/floats, dots, arrows, punctuation, newlines).
-- Preserve exact indentation and preserve existing Java 'package ...;' and 'public class ...' names.`;
+    const slotIdsText = editableSlots.length ? editableSlots.map((s) => s.id).join(", ") : "1";
+    const prompt = previousError
+      ? `Fix this ${lang} error:\n${previousError}\n${errRequiredPkg ? `Line 1 MUST be '${errRequiredPkg}' and class MUST be '${errRequiredClass}'.\n` : ""}\nProblem:\n${problemText}\n\nCurrent Code (change ONLY <<< EDITABLE SLOT N >>>, never modify [LOCKED] lines; for [INLINE_BLANK] fill only the blank inside that line):\n${slottedCode}\n\nReply ONLY with the fixed code for Slot ${slotIdsText} inside triple backticks:\n\`\`\`text\n<<<SLOT 1>>>\n...fixed code...\n<<<END_SLOT 1>>>\n\`\`\``
+      : `Solve this ${lang} problem:\n${problemText}\n\nStarter Code (fill ONLY <<< EDITABLE SLOT N >>>, never modify [LOCKED] lines; for [INLINE_BLANK] fill only the blank inside that line):\n${slottedCode}\n\nReply ONLY with code for Slot ${slotIdsText} inside triple backticks (exact Python indentation & __init__):\n\`\`\`text\n<<<SLOT 1>>>\n...code...\n<<<END_SLOT 1>>>\n\`\`\``;
 
     const shouldUseChatGpt = isWebMode() && (consecutiveSameCode >= 1 || attempt === 3 || attempt === 5);
     let liveScreenshot = null;
@@ -1218,9 +1193,6 @@ Strict Rules:
       setStatus("Capturing screen...", "#60a5fa");
       setOutput("Error/test-case screen ka live screenshot lekar AI ko bhej raha hoon...");
       liveScreenshot = await captureCleanTabScreenshot();
-      if (liveScreenshot) {
-        finalPrompt = `ATTACHED LIVE SCREENSHOT OF CODETANTRA SCREEN: Visually inspect the screenshot carefully! Check the exact pink/red locked tokens vs white editable gaps (including inline fill-in-the-blank lines like 'with ___ as file:'), exact Python indentation dots/arrows, exact SyntaxError/IndentationError/Compilation Error message and '^^' caret, and exact red-highlighted Expected vs Actual test-case mismatches. Return the EXACT fixed code for the editable slot(s) only!\n\n` + prompt;
-      }
     }
     const apiRes = await callGemini(finalPrompt, { expectJson: false, useChatGptFallback: shouldUseChatGpt, screenshot: liveScreenshot });
     if (!apiRes.ok) {
@@ -1724,11 +1696,20 @@ Task:
       return;
     }
 
-    // NEVER blindly rewrite the whole code if test runner status is still unknown (no actual failure detected!)
+    // If test result is still hidden, click 'Test cases' tab once and re-check before giving up!
     if (evalRes.status === "unknown") {
+      await callBridge("CLICK_BUTTON", { targets: ["test cases"] }, 2000);
+      await sleep(1500);
+      evalRes = await callBridge("EVAL_TESTS", {}, 12500);
+    }
+    if (evalRes.status === "unknown") {
+      if (attempt < MAX_FIX_ATTEMPTS) {
+        previousError = "Test cases tab did not show pass yet — re-checking code & Submit.";
+        continue;
+      }
       failedUrls.add(window.location.href);
       setStatus("Check Test Cases", "#facc15");
-      setOutput("Code likh kar Submit daba diya tha, par test result screen par nahi mila — dobara nahi likh raha. Test cases tab check karo ya 'Solve & Type' dabao.");
+      setOutput("Code likh kar Submit daba diya tha, par test result screen par nahi mila — Test cases tab check karo.");
       return;
     }
 
