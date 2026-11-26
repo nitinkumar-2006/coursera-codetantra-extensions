@@ -28,11 +28,10 @@ try {
   }
 } catch {}
 
-// Live-benchmarked best models: gemini-3-flash-preview is #1 (2/2 OK, 0% 503, ~3.3s)
+// Live-benchmarked best models for API mode (skip weak flash-lite-latest)
 const VERIFIED_WORKING_MODELS = [
   "gemini-3-flash-preview",
-  "gemini-flash-lite-latest",
-  "gemini-3.5-flash-lite"
+  "gemini-2.5-flash"
 ];
 
 const BLOCKED_SLIDE_PATTERNS = [];
@@ -315,7 +314,7 @@ function createPanel() {
     <div style="font-weight: 600; margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center; gap:6px;">
       <span style="display:flex; align-items:center; gap:5px; flex-wrap:nowrap;">
         <span style="color:#ffffff; white-space:nowrap; font-size:13px;">CodeTantra</span>
-        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v11.9</span>
+        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v14.1</span>
         <button id="ct-mode-btn" class="ct-icon-btn ct-mode-active" title="Active AI Mode (click to toggle Web / API)">Web</button>
       </span>
       <span style="display:flex; align-items:center; gap:6px;">
@@ -753,26 +752,46 @@ async function callChatGptWeb(prompt) {
   }
 }
 
-async function callGemini(prompt, { expectJson = true, useChatGptFallback = false, preferApiRescue = false, forceApi = false } = {}) {
-  // FAST API-KEY RESCUE: On compiler/retry errors in Web mode, if user has a valid CodeTantra API key, try fast API first (~3s, zero markdown corruption)!
-  if (preferApiRescue && isWebMode() && hasValidApiKey()) {
-    const rescueRes = await callGemini(prompt, { expectJson, useChatGptFallback: false, preferApiRescue: false, forceApi: true });
-    if (rescueRes && rescueRes.ok) return rescueRes;
+async function captureCleanTabScreenshot() {
+  const panel = document.getElementById("ct-helper-panel");
+  const prevVis = panel ? panel.style.visibility : "";
+  try {
+    if (panel) panel.style.visibility = "hidden";
+    await sleep(90);
+    const res = await new Promise((resolve) => {
+      let done = false;
+      const finish = (v) => { if (!done) { done = true; clearTimeout(t); resolve(v); } };
+      const t = setTimeout(() => finish({ ok: false }), 5000);
+      chrome.runtime.sendMessage({ type: "CAPTURE_SCREENSHOT" }, (reply) => {
+        if (chrome.runtime.lastError) finish({ ok: false });
+        else finish(reply || { ok: false });
+      });
+    });
+    if (res && res.ok && res.base64) return { mimeType: res.mimeType || "image/jpeg", base64: res.base64 };
+    return null;
+  } catch {
+    return null;
+  } finally {
+    if (panel) panel.style.visibility = prevVis;
   }
+}
+
+async function callGemini(prompt, { expectJson = true, useChatGptFallback = false, forceApi = false, screenshot = null } = {}) {
+  // STRICT MODE ISOLATION: Web mode stays 100% on Web (Gemini Web + ChatGPT Web); API mode stays 100% on API!
   if (useChatGptFallback && isWebMode() && !forceApi) {
     const gptRes = await callChatGptWeb(prompt);
     if (gptRes && gptRes.ok) return gptRes;
   }
-  // ZERO-API-KEY MODE: Route directly through logged-in gemini.google.com background tab!
+  // ZERO-API-KEY WEB MODE: Route directly through logged-in gemini.google.com (with live screenshot pasted directly in Web chat!)
   if (isWebMode() && !forceApi) {
-    setStatus("AI: Gemini Web...", "#93c5fd");
-    setOutput("Free Gemini Web (gemini.google.com) se answer laa raha hoon (0 API Key)...");
+    setStatus(screenshot ? "Web + Screenshot..." : "AI: Gemini Web...", "#93c5fd");
+    setOutput(screenshot ? "Live screenshot + error Gemini Web par bhej raha hoon..." : "Free Gemini Web (gemini.google.com) se answer laa raha hoon (0 API Key)...");
     try {
       const res = await new Promise((resolve) => {
         let done = false;
         const finish = (v) => { if (!done) { done = true; clearTimeout(t); resolve(v); } };
         const t = setTimeout(() => finish({ ok: false, error: "Gemini Web timeout (130s) — Gemini tab mein 'Neon' se 'Fast' par switch karo ya 'API' mode chalao." }), 130000);
-        chrome.runtime.sendMessage({ type: "GEMINI_WEB_ASK", prompt }, (reply) => {
+        chrome.runtime.sendMessage({ type: "GEMINI_WEB_ASK", prompt, screenshot }, (reply) => {
           if (chrome.runtime.lastError) {
             finish({ ok: false, error: chrome.runtime.lastError.message });
           } else {
@@ -812,11 +831,16 @@ async function callGemini(prompt, { expectJson = true, useChatGptFallback = fals
 
     for (const model of runModels) {
       const isGemma = model.startsWith("gemma-");
-      setStatus(`AI: ${model.replace("gemini-", "")} (K${kIdx + 1})`, "#60a5fa");
-      setOutput(`Code generate kar raha hoon...\nModel: ${model} (Key ${kIdx + 1}/${apiKeys.length})${errorLogs.length ? "\nLast skipped: " + errorLogs[errorLogs.length - 1] : ""}`);
+      const hasImg = Boolean(screenshot && screenshot.base64 && !isGemma);
+      setStatus(hasImg ? `Vision: ${model.replace("gemini-", "")}` : `AI: ${model.replace("gemini-", "")} (K${kIdx + 1})`, "#60a5fa");
+      setOutput(`${hasImg ? "Live screenshot + code dekh kar fix kar raha hoon..." : "Code generate kar raha hoon..."}\nModel: ${model} (Key ${kIdx + 1}/${apiKeys.length})${errorLogs.length ? "\nLast skipped: " + errorLogs[errorLogs.length - 1] : ""}`);
       try {
+        const reqParts = [{ text: prompt }];
+        if (hasImg) {
+          reqParts.push({ inline_data: { mime_type: screenshot.mimeType || "image/jpeg", data: screenshot.base64 } });
+        }
         const bodyObj = {
-          contents: [{ parts: [{ text: prompt }] }]
+          contents: [{ parts: reqParts }]
         };
         if (expectJson && !isGemma) {
           bodyObj.generationConfig = { responseMimeType: "application/json" };
@@ -960,53 +984,66 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
       : getCleanTopFallbackText();
   const tcOpened = /test case\s*1/i.test(problemText);
 
-  function buildEditableSlots(code, lockedLines = []) {
+  function buildEditableSlots(code, lockedLines = [], partialLockedLines = []) {
     const lines = (code || "").replace(/\r\n/g, "\n").split("\n");
     const lockedSet = new Set(lockedLines || []);
+    const partialSet = new Set(partialLockedLines || []);
     const slots = [];
     let start = -1;
-    for (let ln = 1; ln <= lines.length; ln++) {
-      if (!lockedSet.has(ln)) {
-        if (start === -1) start = ln;
-      } else if (start !== -1) {
-        slots.push({
-          id: slots.length + 1,
-          start_line: start,
-          end_line: ln - 1,
-          code: lines.slice(start - 1, ln - 1).join("\n")
-        });
+    const isCommentOrBlankOnly = (txt) => !txt.replace(/#.*|\/\/.*|\/\*[\s\S]*?\*\//g, "").trim();
+    const flush = (endLn) => {
+      if (start !== -1 && endLn >= start) {
+        const sliceCode = lines.slice(start - 1, endLn).join("\n");
+        // When [INLINE_BLANK] lines exist, skip pure comment/blank slots so AI never writes code above the blank line!
+        if (partialSet.size === 0 || !isCommentOrBlankOnly(sliceCode)) {
+          slots.push({
+            id: slots.length + 1,
+            start_line: start,
+            end_line: endLn,
+            code: sliceCode
+          });
+        }
         start = -1;
       }
+    };
+    for (let ln = 1; ln <= lines.length; ln++) {
+      if (partialSet.has(ln)) {
+        flush(ln - 1);
+        slots.push({ id: slots.length + 1, start_line: ln, end_line: ln, code: lines[ln - 1] });
+      } else if (!lockedSet.has(ln)) {
+        if (start === -1) start = ln;
+      } else {
+        flush(ln - 1);
+      }
     }
-    if (start !== -1) {
-      slots.push({
-        id: slots.length + 1,
-        start_line: start,
-        end_line: lines.length,
-        code: lines.slice(start - 1).join("\n")
-      });
-    }
+    flush(lines.length);
     return slots;
   }
 
-  function formatCodeWithSlots(code, lockedLines = [], slots = []) {
+  function formatCodeWithSlots(code, lockedLines = [], slots = [], partialLockedLines = []) {
     const lines = (code || "").replace(/\r\n/g, "\n").split("\n");
     if (!lines.length || (lines.length === 1 && !lines[0].trim())) return "<<< EDITABLE SLOT 1 (Empty File) >>>\n<<< END SLOT 1 >>>";
     const slotStartMap = new Map(slots.map((s) => [s.start_line, s]));
     const slotEndMap = new Map(slots.map((s) => [s.end_line, s]));
     const lockedSet = new Set(lockedLines || []);
+    const partialSet = new Set(partialLockedLines || []);
     const out = [];
     for (let ln = 1; ln <= lines.length; ln++) {
       const st = slotStartMap.get(ln);
       if (st) out.push(`<<< EDITABLE SLOT ${st.id} (Lines ${st.start_line}-${st.end_line}) >>>`);
-      out.push(`${ln} ${lockedSet.has(ln) ? "[LOCKED]" : "[EDITABLE]"}: ${lines[ln - 1]}`);
+      const tag = lockedSet.has(ln)
+        ? "[LOCKED]"
+        : partialSet.has(ln)
+        ? "[INLINE_BLANK - FILL ONLY THE WHITE GAP INSIDE THIS LINE; DO NOT WRITE THIS STATEMENT ON AN EMPTY LINE ABOVE]"
+        : "[EDITABLE]";
+      out.push(`${ln} ${tag}: ${lines[ln - 1]}`);
       const en = slotEndMap.get(ln);
       if (en) out.push(`<<< END SLOT ${en.id} >>>`);
     }
     return out.join("\n");
   }
 
-  const initialSlots = buildEditableSlots(edState.code, edState.lockedLines);
+  const initialSlots = buildEditableSlots(edState.code, edState.lockedLines, edState.partialLockedLines);
   const existingEditableChars = initialSlots
     .map((s) => s.code.replace(/\/\/.*|\/\*[\s\S]*?\*\/|#.*|\s+/g, "").length)
     .reduce((a, b) => a + b, 0);
@@ -1024,7 +1061,8 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
   }
 
   // PRE-CHECK SUBMIT: If editor ALREADY has written code in [EDITABLE] slots and no test result is shown yet, Submit ONCE first to get the exact compiler/test-case error!
-  if ((!existingEval || existingEval.status === "unknown") && existingEditableChars > 90) {
+  const preCheckMinChars = (edState.partialLockedLines || []).length > 0 ? 15 : 90;
+  if ((!existingEval || existingEval.status === "unknown") && existingEditableChars > preCheckMinChars) {
     setStatus("Checking existing code...", "#60a5fa");
     setOutput("Editor mein code pehle se likha hai — pehle Submit karke exact error / test-case diff nikal raha hoon...");
     const preSub = await callBridge("CLICK_BUTTON", { targets: ["submit", "submit code", "compile & run"], preferEditorSubmit: true }, 3000);
@@ -1071,7 +1109,23 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
 
   for (let attempt = 1; attempt <= MAX_FIX_ATTEMPTS; attempt++) {
     let currentState = attempt === 1 ? activeEdState : await callBridge("READ_EDITOR", {}, 10000);
-    const editableSlots = buildEditableSlots(currentState.code, currentState.lockedLines);
+    if (
+      (currentState.partialLockedLines || []).length > 0 &&
+      /syntaxerror|indentationerror|taberror|expected|compilation error/i.test(previousError || "") &&
+      (attempt > 1 || (existingEval && existingEval.status === "failed"))
+    ) {
+      setStatus("Resetting inline blank...", "#facc15");
+      setOutput("Inline blank ke upar/andar error tha — Reset dabakar clean starter code wapas laa raha hoon...");
+      const rst = await callBridge("CLICK_BUTTON", { targets: ["reset", "reset code"] }, 3000);
+      if (rst && rst.ok) {
+        await sleep(600);
+        await callBridge("CLICK_BUTTON", { targets: ["yes", "ok", "confirm", "reset"] }, 2500);
+        await sleep(1200);
+        currentState = await callBridge("READ_EDITOR", {}, 10000);
+        lastTypedCodeFingerprint = "";
+      }
+    }
+    const editableSlots = buildEditableSlots(currentState.code, currentState.lockedLines, currentState.partialLockedLines);
     const latestErrInfo = extractJavaPkgAndClassFromError(previousError);
     if (latestErrInfo.pkg) errRequiredPkg = latestErrInfo.pkg;
     if (latestErrInfo.cls) errRequiredClass = latestErrInfo.cls;
@@ -1122,7 +1176,7 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
         : `Editor: ${currentState.type.toUpperCase()} (${lang}) | Test Cases: ${tcOpened ? "Opened ✓" : "Read"}\nStep 2: Andar hi code blueprint bana raha hoon...`
     );
 
-    const slottedCode = formatCodeWithSlots(currentState.code, currentState.lockedLines, editableSlots);
+    const slottedCode = formatCodeWithSlots(currentState.code, currentState.lockedLines, editableSlots, currentState.partialLockedLines);
     const slotGuide = editableSlots.length
       ? editableSlots.map((s) => `Slot ${s.id}: Lines ${s.start_line}-${s.end_line}`).join(", ")
       : "Slot 1: Full file";
@@ -1147,6 +1201,8 @@ OUTPUT FORMAT — DO NOT USE JSON! Wrap your ENTIRE reply inside ONE fenced code
 
 Strict Rules:
 - Write ONLY in ${lang}!
+- Do NOT output <<<SLOT N>>> for slots that only contain comments or need no changes.
+- CRITICAL FOR [INLINE_BLANK] LINES: If a line is tagged [INLINE_BLANK ...], you MUST complete the statement INSIDE that exact line by replacing only the blank gap (for example, turning 'with       as file:' into 'with open(filename, \"r\") as file:'). NEVER write that statement on an empty [EDITABLE] line above it!
 - CRITICAL FOR PYTHON: ALWAYS wrap your <<<SLOT N>>> output inside triple backticks so indentation and double underscores (__init__, __str__) are 100% preserved! Every method inside a class MUST be indented 1 level (4 spaces or 1 tab), and every statement inside a method/if/for MUST be indented +1 level!
 - Format code cleanly on multiple lines with proper indentation (NEVER put multiple statements on a single line!).
 - Read the EXACT input format specified in the Problem Statement (e.g., read 'int n = sc.nextInt();' first, then 'for (int i = 0; i < n; i++)' — NEVER use 'while (sc.hasNextInt())' when 'n' is given, or CodeTantra will fail with "reading more inputs than expected"!).
@@ -1155,10 +1211,18 @@ Strict Rules:
 - Match Sample Test Cases & Expected vs Actual output character-for-character (spaces, decimals/floats, dots, arrows, punctuation, newlines).
 - Preserve exact indentation and preserve existing Java 'package ...;' and 'public class ...' names.`;
 
-    const isCompileRetry = Boolean(previousError) && /compilation error|error in |cannot find symbol|illegal start|not a statement|expected|indentationerror|syntaxerror|taberror/i.test(previousError);
-    const shouldUseApiRescue = isWebMode() && hasValidApiKey() && (isCompileRetry || attempt >= 2);
     const shouldUseChatGpt = isWebMode() && (consecutiveSameCode >= 1 || attempt === 3 || attempt === 5);
-    const apiRes = await callGemini(prompt, { expectJson: false, useChatGptFallback: shouldUseChatGpt, preferApiRescue: shouldUseApiRescue });
+    let liveScreenshot = null;
+    let finalPrompt = prompt;
+    if (Boolean(previousError) || attempt >= 2) {
+      setStatus("Capturing screen...", "#60a5fa");
+      setOutput("Error/test-case screen ka live screenshot lekar AI ko bhej raha hoon...");
+      liveScreenshot = await captureCleanTabScreenshot();
+      if (liveScreenshot) {
+        finalPrompt = `ATTACHED LIVE SCREENSHOT OF CODETANTRA SCREEN: Visually inspect the screenshot carefully! Check the exact pink/red locked tokens vs white editable gaps (including inline fill-in-the-blank lines like 'with ___ as file:'), exact Python indentation dots/arrows, exact SyntaxError/IndentationError/Compilation Error message and '^^' caret, and exact red-highlighted Expected vs Actual test-case mismatches. Return the EXACT fixed code for the editable slot(s) only!\n\n` + prompt;
+      }
+    }
+    const apiRes = await callGemini(finalPrompt, { expectJson: false, useChatGptFallback: shouldUseChatGpt, screenshot: liveScreenshot });
     if (!apiRes.ok) {
       setStatus("API Error", "#f87171");
       setOutput(`Gemini Error:\n${apiRes.error}`);
@@ -1354,14 +1418,49 @@ Strict Rules:
 
     const assembledPreview = assembleCode(currentState.code, edits);
 
-    // PYTHON INDENTATION GUARD: Catch ANY zero-indented line immediately after 'class ...:' BEFORE typing into editor!
-    if (isPythonLang && /^class\s+\w+[^:]*:[ \t]*\n(?![ \t]+|\n|#)/m.test(assembledPreview)) {
-      if (attempt < MAX_FIX_ATTEMPTS) {
+    // INLINE_BLANK COMPLETENESS GUARD: Never submit if an [INLINE_BLANK] line was left unfilled!
+    if ((currentState.partialLockedLines || []).length > 0 && attempt < MAX_FIX_ATTEMPTS) {
+      const previewLines = assembledPreview.split("\n");
+      const origLines = (currentState.code || "").replace(/\r\n/g, "\n").split("\n");
+      const unfilledLn = (currentState.partialLockedLines || []).find((ln) => {
+        const pLine = previewLines[ln - 1] || "";
+        const oLine = origLines[ln - 1] || "";
+        return /\S\s{3,}\S/.test(pLine) || (pLine === oLine && /\S\s{2,}\S/.test(oLine));
+      });
+      if (unfilledLn) {
+        const blankSlot = editableSlots.find((s) => s.start_line === unfilledLn && s.end_line === unfilledLn);
+        previousError =
+          `CRITICAL: You left [INLINE_BLANK] on Line ${unfilledLn} UNFILLED! You MUST output <<<SLOT ${blankSlot ? blankSlot.id : 1}>>> with the completed Line ${unfilledLn} (fill the white gap inside '${(origLines[unfilledLn - 1] || "").trim()}').`;
+        setStatus(`Blank missed (${attempt})...`, "#facc15");
+        setOutput(`AI ne Line ${unfilledLn} ka [INLINE_BLANK] khali chhod diya — Submit nahi kar raha, dobara fill maang raha hoon...`);
+        continue;
+      }
+    }
+
+    // PYTHON INDENTATION GUARD: Catch ANY zero/under-indented line immediately after a block header ending with ':' BEFORE typing!
+    if (isPythonLang && attempt < MAX_FIX_ATTEMPTS) {
+      const pyLines = assembledPreview.split("\n");
+      let badIndentLine = -1;
+      for (let pi = 0; pi < pyLines.length - 1; pi++) {
+        const cur = pyLines[pi];
+        if (!/^[ \t]*(?:class|def|if|elif|else|for|while|with|try|except|finally)\b[^#]*:[ \t]*(?:#.*)?$/.test(cur)) continue;
+        const curIndent = (cur.match(/^([ \t]*)/) || ["", ""])[1].length;
+        let nextIdx = pi + 1;
+        while (nextIdx < pyLines.length && (!pyLines[nextIdx].trim() || /^\s*#/.test(pyLines[nextIdx]))) nextIdx++;
+        if (nextIdx < pyLines.length) {
+          const nxtIndent = (pyLines[nextIdx].match(/^([ \t]*)/) || ["", ""])[1].length;
+          if (nxtIndent <= curIndent) {
+            badIndentLine = nextIdx + 1;
+            break;
+          }
+        }
+      }
+      if (badIndentLine !== -1) {
         previousError =
           (previousError ? previousError + "\n" : "") +
-          "CRITICAL PYTHON INDENTATION ERROR: Your previous reply had 0 spaces before 'def' inside a class! Wrap your ENTIRE <<<SLOT 1>>> output inside a triple-backtick code block (```python ... ```) with exact 4-space and 8-space indentation!";
+          `CRITICAL PYTHON INDENTATION ERROR at Line ${badIndentLine}: Line ${badIndentLine} MUST be indented deeper than the ':' header above it! Wrap your ENTIRE <<<SLOT N>>> output inside triple backticks with exact indentation!`;
         setStatus(`Indent retry (${attempt})...`, "#facc15");
-        setOutput("Python indentation missing thi — code block mein proper 4-space indentation maang raha hoon...");
+        setOutput(`Line ${badIndentLine} par Python indentation missing thi — dobara sahi indentation maang raha hoon...`);
         continue;
       }
     }

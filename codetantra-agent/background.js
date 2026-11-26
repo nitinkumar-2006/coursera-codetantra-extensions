@@ -76,7 +76,7 @@ async function getOrCreateGeminiTab() {
 }
 
 // Executed directly inside https://gemini.google.com/* via chrome.scripting.executeScript
-async function submitPromptDirect(promptText) {
+async function submitPromptDirect(promptText, screenshot = null) {
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const isVis = (el) => {
     if (!el) return false;
@@ -100,7 +100,7 @@ async function submitPromptDirect(promptText) {
       } catch {}
       try {
         for (const el of node.querySelectorAll("*")) {
-          if (el.shadowRoot) walk(el.shadowRoot);
+          if (el.tagName && el.tagName.includes("-") && el.shadowRoot) walk(el.shadowRoot);
         }
       } catch {}
     };
@@ -240,6 +240,22 @@ async function submitPromptDirect(promptText) {
     } catch {}
     await wait(80);
 
+    // Attach live screenshot directly to Gemini Web chat box when provided!
+    if (screenshot && screenshot.base64) {
+      try {
+        const bin = atob(screenshot.base64);
+        const bytes = new Uint8Array(bin.length);
+        for (let bi = 0; bi < bin.length; bi++) bytes[bi] = bin.charCodeAt(bi);
+        const imgFile = new File([bytes], "codetantra_error.jpg", { type: screenshot.mimeType || "image/jpeg" });
+        const imgDt = new DataTransfer();
+        imgDt.items.add(imgFile);
+        inputEl.dispatchEvent(
+          new ClipboardEvent("paste", { bubbles: true, cancelable: true, composed: true, clipboardData: imgDt })
+        );
+        await wait(1100);
+      } catch {}
+    }
+
     // METHOD 1: Simulated Clipboard Paste (inserts full multi-line prompt cleanly without Enter-submit on \n!)
     try {
       const dt = new DataTransfer();
@@ -362,7 +378,7 @@ function pollResponseDirect(beforeCount, beforeLastText, beforeJsonCount) {
       } catch {}
       try {
         for (const el of node.querySelectorAll("*")) {
-          if (el.shadowRoot) walk(el.shadowRoot);
+          if (el.tagName && el.tagName.includes("-") && el.shadowRoot) walk(el.shadowRoot);
         }
       } catch {}
     };
@@ -441,7 +457,7 @@ function pollResponseDirect(beforeCount, beforeLastText, beforeJsonCount) {
   return { ok: true, hasNew: false, isNewNode: false, generating, text: "" };
 }
 
-async function askGeminiWebTab(prompt, callerTabId) {
+async function askGeminiWebTab(prompt, callerTabId, screenshot = null) {
   const keepAlive = setInterval(() => {
     try {
       chrome.runtime.getPlatformInfo(() => {});
@@ -456,7 +472,7 @@ async function askGeminiWebTab(prompt, callerTabId) {
       return { ok: false, error: "gemini.google.com tab open nahi ho paya." };
     }
 
-    notifyProgress(callerTabId, "2/4 Pura question + code Gemini mein paste kar raha hoon...");
+    notifyProgress(callerTabId, screenshot ? "2/4 Live screenshot + question Gemini Web mein paste kar raha hoon..." : "2/4 Pura question + code Gemini mein paste kar raha hoon...");
     await withTimeout(chrome.tabs.update(tab.id, { active: true }), 3000, "tabs.update");
     switchedToGemini = true;
     await sleep(250);
@@ -467,9 +483,9 @@ async function askGeminiWebTab(prompt, callerTabId) {
         chrome.scripting.executeScript({
           target: { tabId: tab.id },
           func: submitPromptDirect,
-          args: [prompt]
+          args: [prompt, screenshot]
         }),
-        14000,
+        25000,
         "submitPromptDirect"
       );
       submitRes = execArr && execArr[0] ? execArr[0].result : null;
@@ -745,8 +761,24 @@ async function askChatGptWebTab(prompt, callerTabId) {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg) return false;
+  if (msg.type === "CAPTURE_SCREENSHOT") {
+    const winId = sender?.tab?.windowId ?? null;
+    try {
+      chrome.tabs.captureVisibleTab(winId, { format: "jpeg", quality: 80 }, (dataUrl) => {
+        if (chrome.runtime.lastError || !dataUrl) {
+          sendResponse({ ok: false, error: chrome.runtime.lastError?.message || "Screenshot capture failed." });
+        } else {
+          const base64 = dataUrl.replace(/^data:image\/[a-z]+;base64,/i, "");
+          sendResponse({ ok: true, mimeType: "image/jpeg", base64 });
+        }
+      });
+    } catch (err) {
+      sendResponse({ ok: false, error: String(err?.message || err) });
+    }
+    return true;
+  }
   if (msg.type === "GEMINI_WEB_ASK") {
-    askGeminiWebTab(msg.prompt || "", sender?.tab?.id)
+    askGeminiWebTab(msg.prompt || "", sender?.tab?.id, msg.screenshot || null)
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
     return true;

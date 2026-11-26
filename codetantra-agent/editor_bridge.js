@@ -313,6 +313,28 @@
       } catch {}
     }
 
+    // Strip sidebar TOC blocks & footer UI boilerplate so Gemini/ChatGPT only sees the actual problem!
+    const rawLines = text.split("\n");
+    const isTocLine = (l) => /^\d+(?:\.\d+){0,2}\.\s+\S/.test((l || "").trim());
+    const cleanedLines = [];
+    for (let i = 0; i < rawLines.length; i++) {
+      const trimmed = rawLines[i].trim();
+      if (/^(search content|minimum 3 characters required for search|translation failed|reason for late submission|please enter at least 15 characters)$/i.test(trimmed)) {
+        continue;
+      }
+      // Skip contiguous TOC runs of 3+ numbered unit/module/lesson lines
+      if (isTocLine(trimmed)) {
+        let runEnd = i;
+        while (runEnd + 1 < rawLines.length && isTocLine(rawLines[runEnd + 1].trim())) runEnd++;
+        if (runEnd - i + 1 >= 3) {
+          i = runEnd;
+          continue;
+        }
+      }
+      cleanedLines.push(rawLines[i]);
+    }
+    text = cleanedLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+
     return text.slice(0, 9000);
   }
 
@@ -465,9 +487,12 @@
 
     function isCardCompleted(card) {
       const txt = normalizeText(card.innerText || "");
-      if (txt.includes("completed") || txt.includes("100%")) return true;
+      // NEVER treat "0% completed" or "50% completed" as done — only 100% or explicit "completed" badge!
+      if (/\b100%/.test(txt)) return true;
+      if (/(?:^|\n)\s*completed\s*(?:$|\n)/i.test(card.innerText || "")) return true;
+      if (!/\b\d+%\s*completed\b/i.test(txt) && txt.includes("completed")) return true;
       const doneEl = card.querySelector(
-        '.text-success, .text-green, .completed, .fa-check, .fa-check-circle, [class*="check" i][class*="green" i], [class*="complete" i]'
+        '.text-success, .text-green, .fa-check, .fa-check-circle, [class*="check" i][class*="green" i]'
       );
       if (doneEl) return true;
       const icons = Array.from(card.querySelectorAll("svg, path, circle, i, span"));
@@ -487,21 +512,28 @@
 
     target.scrollIntoView({ behavior: "instant", block: "center" });
 
-    // Click the actual link/button or clickable card ancestor
-    const clickable =
+    // Find the true clickable card host (walks up past inner text wrappers if parent has cursor:pointer)
+    let clickable =
       target.closest('a[href], button, [role="button"]') ||
       target.querySelector('a[href], button, [role="button"]') ||
       target;
+    if (clickable === target) {
+      let cur = target;
+      for (let up = 0; up < 3 && cur && cur.parentElement && cur.parentElement !== doc.body; up++) {
+        const p = cur.parentElement;
+        const pr = p.getBoundingClientRect();
+        if (pr.height <= 200 && (win.getComputedStyle(p).cursor === "pointer" || p.getAttribute("role") === "button" || p.tagName === "A")) {
+          clickable = p;
+          cur = p;
+        } else {
+          break;
+        }
+      }
+    }
 
-    clickable.click();
+    dispatchReliableClick(clickable);
     if (clickable !== target) {
-      try {
-        target.click();
-      } catch {}
-    } else if (target.parentElement && win.getComputedStyle(target.parentElement).cursor === "pointer") {
-      try {
-        target.parentElement.click();
-      } catch {}
+      try { dispatchReliableClick(target); } catch {}
     }
 
     return { ok: true, title };
@@ -654,17 +686,24 @@
         const isUnit = unitPattern.test(txt) && !leafPattern.test(txt);
 
         if (isModule && (!nextRow || !unitPattern.test(nextTxt)) && (hasPink || !hasGreen)) {
-          // Expand collapsed module (e.g. "9. Unit 2...")
+          // Expand collapsed module (e.g. "7. Unit 4..."), then expand its first non-green sub-unit (e.g. "7.1. File Operations")!
           clickSidebarRow(row);
-          await sleep(450);
+          await sleep(550);
+          const expandedUnits = getSidebarRows(unitPattern).filter(
+            (r) => !getSidebarIconStatus(r).hasGreen && !isSamePage(r) && !isBlockedQuestionText(r.innerText || "")
+          );
+          if (expandedUnits.length) {
+            clickSidebarRow(expandedUnits[0]);
+            await sleep(550);
+          }
           const expandedLeaves = getSidebarRows(leafPattern).filter(
             (r) => !getSidebarIconStatus(r).hasGreen && !isSamePage(r) && !isBlockedQuestionText(r.innerText || "")
           );
           if (expandedLeaves.length) return clickSidebarRow(expandedLeaves[0]);
         } else if (isUnit && (!nextRow || !leafPattern.test(nextTxt)) && (hasPink || !hasGreen)) {
-          // Expand collapsed sub-unit (e.g. "9.4. Circular Queue..." or "9.6. Deque")
+          // Expand collapsed sub-unit (e.g. "7.1. File Operations" or "9.4. Circular Queue...")
           clickSidebarRow(row);
-          await sleep(450);
+          await sleep(550);
           const expandedLeaves = getSidebarRows(leafPattern).filter(
             (r) => !getSidebarIconStatus(r).hasGreen && !isSamePage(r) && !isBlockedQuestionText(r.innerText || "")
           );
@@ -971,32 +1010,38 @@
     return diffLines.length ? `EXACT EXPECTED vs ACTUAL MISMATCHES:\n${diffLines.join("\n")}` : "";
   }
 
-  // Extract dedicated 'Compilation Error' panel text in FULL (never cutting off 'symbol: method ...' or 'location: class ...'!)
+  // Extract dedicated Compilation / Runtime / Python SyntaxError / IndentationError / NameError panel in FULL!
   function extractCompilationErrorBlock(doc) {
     if (!doc || !doc.body) return "";
     const win = doc.defaultView || window;
     const minRightX = Math.floor((win.innerWidth || 1200) * 0.35);
+    const errHeadingRe = /^(compilation error|compile error|runtime error|syntaxerror|indentationerror|taberror|nameerror|typeerror|valueerror|attributeerror|indexerror|keyerror|zerodivisionerror|filenotfounderror|importerror|modulenotfounderror|recursionerror|eoferror|runtimeerror|segmentation fault|time limit exceeded)\b/i;
     try {
-      const headings = Array.from(doc.querySelectorAll("div, span, h1, h2, h3, h4, h5, p")).filter((el) => {
+      const headings = Array.from(doc.querySelectorAll("a, div, span, h1, h2, h3, h4, h5, p")).filter((el) => {
         if (el.closest('#ct-helper-panel, .cm-editor, .ace_editor, aside, nav, [class*="sidebar" i]') || !isVisible(el)) return false;
         const r = el.getBoundingClientRect();
         if (r.left < minRightX) return false;
-        const t = normalizeText(el.innerText || el.textContent || "");
-        return t === "compilation error" || t === "runtime error" || t === "compile error";
+        const t = normalizeText(el.innerText || el.textContent || "").replace(/[^a-z0-9 ]+/g, "").trim();
+        return t.length > 0 && t.length < 36 && errHeadingRe.test(t);
       });
       for (const h of headings) {
         let bestText = "";
         let box = h.parentElement;
-        for (let up = 0; up < 5 && box && box !== doc.body; up++) {
+        for (let up = 0; up < 6 && box && box !== doc.body; up++) {
           const r = box.getBoundingClientRect();
           const t = (box.innerText || "").trim();
           const low = normalizeText(t);
-          // Stay strictly inside the right-side error drawer (never climb up into Sample Test Cases / left pane!)
-          if (r.left < minRightX - 20 || low.includes("sample test cases") || t.length > 3200) break;
+          // Stay strictly inside the right-side error drawer (never climb up into .cm-editor / Sample Test Cases / left pane!)
+          if (
+            r.left < minRightX - 20 ||
+            low.includes("sample test cases") ||
+            t.length > 3500 ||
+            box.querySelector(".cm-editor, .ace_editor, .monaco-editor, .CodeMirror")
+          ) break;
           if (t.length > bestText.length) bestText = t;
           box = box.parentElement;
         }
-        if (bestText.length > 25) {
+        if (bestText.length > 20) {
           return `COMPILATION / RUNTIME ERROR:\n${bestText}`;
         }
       }
@@ -1586,8 +1631,9 @@
   }
 
   // Scan ALL lines in CodeMirror 6 (even off-screen virtualized lines!) using scroll sweeps + posAtDOM
-  async function scanAllLockedLinesCM6(ed) {
+  async function scanLineLocksCM6(ed) {
     const lockedSet = new Set();
+    const partialLockedSet = new Set();
     const view = ed.editor;
     const scroller = ed.el?.querySelector(".cm-scroller") || ed.contentEl?.parentElement;
 
@@ -1604,14 +1650,35 @@
           cls.includes("readonly") ||
           cls.includes("locked") ||
           Boolean(el.querySelector('[class*="readOnly" i], [class*="locked" i]'));
-        if (isExplicitReadOnly || hasPinkBg || hasPinkChild) {
-          let lineNum = idx + 1;
-          if (view && typeof view.posAtDOM === "function" && view.state?.doc) {
-            try {
-              const pos = view.posAtDOM(el);
-              lineNum = view.state.doc.lineAt(pos).number;
-            } catch {}
+
+        // INLINE FILL-IN-THE-BLANK CHECK (e.g. "[PINK]with[WHITE]       [PINK]as file:"):
+        // If a line does NOT have a full-line pink background, check whether it has an editable non-pink gap between pink spans!
+        let hasEditableInlineGap = false;
+        if (!hasPinkBg && hasPinkChild) {
+          for (const node of Array.from(el.childNodes)) {
+            const txt = (node.textContent || "").replace(/\u200B/g, "");
+            if (!txt) continue;
+            if (node.nodeType === 3) {
+              if (txt.length >= 2) { hasEditableInlineGap = true; break; }
+            } else if (node.nodeType === 1) {
+              const nBg = ed.win.getComputedStyle(node).backgroundColor || "";
+              const childHasPink = isPinkLockedBg(nBg) || Array.from(node.querySelectorAll("span")).some((s) => isPinkLockedBg(ed.win.getComputedStyle(s).backgroundColor || ""));
+              if (!childHasPink && txt.length >= 2) { hasEditableInlineGap = true; break; }
+            }
           }
+        }
+
+        let lineNum = idx + 1;
+        if (view && typeof view.posAtDOM === "function" && view.state?.doc) {
+          try {
+            const pos = view.posAtDOM(el);
+            lineNum = view.state.doc.lineAt(pos).number;
+          } catch {}
+        }
+
+        if (hasEditableInlineGap) {
+          partialLockedSet.add(lineNum);
+        } else if (isExplicitReadOnly || hasPinkBg || hasPinkChild) {
           lockedSet.add(lineNum);
         }
       });
@@ -1633,16 +1700,25 @@
       collectVisible();
     }
 
-    return Array.from(lockedSet).sort((a, b) => a - b);
+    return {
+      lockedLines: Array.from(lockedSet).sort((a, b) => a - b),
+      partialLockedLines: Array.from(partialLockedSet).sort((a, b) => a - b)
+    };
+  }
+
+  async function scanAllLockedLinesCM6(ed) {
+    const res = await scanLineLocksCM6(ed);
+    return res.lockedLines;
   }
 
   async function readEditorStateLocal({ light = false } = {}) {
     const ed = detectEditorRecursive(document, window);
-    if (!ed) return { found: false, type: "none", code: "", language: "", lockedLines: [], problemText: "" };
+    if (!ed) return { found: false, type: "none", code: "", language: "", lockedLines: [], partialLockedLines: [], problemText: "" };
 
     let code = "";
     let language = detectLanguageFromDoc(ed.doc);
     let lockedLines = [];
+    let partialLockedLines = [];
 
     if (ed.type === "cm6") {
       if (ed.editor && ed.editor.state && ed.editor.state.doc) {
@@ -1652,7 +1728,9 @@
         code = lineEls.map((l) => (l.textContent || "").replace(/\u200B/g, "")).join("\n");
       }
       if (!light) {
-        lockedLines = await scanAllLockedLinesCM6(ed);
+        const lockInfo = await scanLineLocksCM6(ed);
+        lockedLines = lockInfo.lockedLines;
+        partialLockedLines = lockInfo.partialLockedLines;
       }
     } else if (ed.type === "ace") {
       code = ed.editor.getValue() || "";
@@ -1669,7 +1747,7 @@
 
     const problemText = extractProblemTextFromDoc(ed.doc);
     const hasMultiLangDropdown = hasMultiLangDropdownInDoc(ed.doc);
-    return { found: true, type: ed.type, code, language, lockedLines, problemText, hasMultiLangDropdown };
+    return { found: true, type: ed.type, code, language, lockedLines, partialLockedLines, problemText, hasMultiLangDropdown };
   }
 
   function emitProgressToTop(pct, doneChars, totalChars) {
@@ -1762,12 +1840,33 @@
         let to = doc.length;
         let oldLineCount = doc.lines;
 
+        let text = (edit.code || "").replace(/\r\n/g, "\n");
         if (edit.mode === "replace_lines" && edit.start_line >= 1) {
           const adjStart = Math.max(1, Math.min(edit.start_line + lineDelta, doc.lines));
           const adjEnd = Math.max(adjStart, Math.min((edit.end_line || edit.start_line) + lineDelta, doc.lines));
           from = doc.line(adjStart).from;
           to = doc.line(adjEnd).to;
           oldLineCount = adjEnd - adjStart + 1;
+
+          // INLINE PARTIAL-LOCK TRIMMING (e.g. "with       as file:" -> "with open(filename, 'r') as file:"):
+          // Trim identical prefix & suffix characters so pink locked tokens on the SAME line are NEVER touched!
+          const existingSlice = doc.sliceString(from, to);
+          if (adjStart === adjEnd) {
+            const gapMatch = existingSlice.match(/^(\S+\s)\s{2,}(\s*\S.*)$/);
+            if (gapMatch && !text.trim().startsWith(gapMatch[1].trim())) {
+              const suf = gapMatch[2].startsWith(" ") ? gapMatch[2] : " " + gapMatch[2];
+              text = gapMatch[1] + text.trim() + suf;
+            }
+          }
+          let p = 0;
+          while (p < existingSlice.length && p < text.length && existingSlice[p] === text[p]) p++;
+          let s = 0;
+          while (s < existingSlice.length - p && s < text.length - p && existingSlice[existingSlice.length - 1 - s] === text[text.length - 1 - s]) s++;
+          if (p > 0 || s > 0) {
+            from += p;
+            to -= s;
+            text = text.slice(p, text.length - s);
+          }
         }
 
         if (to > from) {
@@ -1807,7 +1906,6 @@
           }
         }
 
-        const text = (edit.code || "").replace(/\r\n/g, "\n");
         let cursor = Math.max(0, Math.min(from, view.state.doc.length));
         let acceptedChars = 0;
         // Auto-detected winning strategy: "dispatch" -> "exec" -> "unfiltered"
