@@ -1049,6 +1049,41 @@
     return "";
   }
 
+  // Detect whether the question's header timer pill (e.g. '05:47') is GREEN (already completed/passed!)
+  function isTimerGreenInDoc(doc) {
+    if (!doc || !doc.body) return false;
+    try {
+      const win = doc.defaultView || window;
+      const maxLeftX = Math.floor((win.innerWidth || 1200) * 0.52);
+      const els = Array.from(doc.querySelectorAll("span, div, button, p")).filter((el) => {
+        if (el.closest('#ct-helper-panel, .cm-editor, .ace_editor, aside, nav, [class*="sidebar" i]') || !isVisible(el)) return false;
+        const r = el.getBoundingClientRect();
+        if (r.top < 60 || r.top > 280 || r.left > maxLeftX || r.width < 28 || r.width > 140 || r.height < 14 || r.height > 44) return false;
+        const t = (el.innerText || el.textContent || "").trim();
+        return /^\d{1,2}:\d{2}(?::\d{2})?$/.test(t);
+      });
+      for (const el of els) {
+        for (const node of [el, el.parentElement]) {
+          if (!node) continue;
+          const cls = (node.className || "").toString();
+          if (/\b(bg-success|btn-success|badge-success)\b/i.test(cls)) return true;
+          const st = win.getComputedStyle(node);
+          for (const prop of [st.backgroundColor, st.color]) {
+            const m = (prop || "").match(/rgba?\(\s*(\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?/);
+            if (!m) continue;
+            const a = m[4] !== undefined ? parseFloat(m[4]) : 1;
+            if (a < 0.08) continue;
+            const r = parseInt(m[1], 10);
+            const g = parseInt(m[2], 10);
+            const b = parseInt(m[3], 10);
+            if (g > 110 && g > r + 25 && g > b + 20) return true;
+          }
+        }
+      }
+    } catch {}
+    return false;
+  }
+
   // Exact CodeTantra Test-Case Pass / Fail Evaluation Parser!
   async function evaluateTestResultsInDoc(doc) {
     if (!doc || !doc.body) return { status: "unknown", summary: "" };
@@ -1105,6 +1140,10 @@
       normErr.includes("output mismatch")
     ) {
       return { status: "failed", summary: errText };
+    }
+
+    if (isTimerGreenInDoc(doc)) {
+      return { status: "passed", summary: "Timer pill is GREEN ✓" };
     }
 
     return { status: "unknown", summary: errText };
@@ -1651,37 +1690,21 @@
           cls.includes("locked") ||
           Boolean(el.querySelector('[class*="readOnly" i], [class*="locked" i]'));
 
-        // INLINE FILL-IN-THE-BLANK CHECK (STRICT: e.g. "[PINK]with[WHITE 3+ spaces][PINK]as file:"):
-        // Must have pink spans BOTH before and after a non-pink whitespace gap of 3+ spaces — NEVER trigger on '} else {' or indentation!
+        // INLINE FILL-IN-THE-BLANK CHECK:
+        // Catches BOTH "[PINK]with[WHITE 3+][PINK]as file:" AND "[PINK]line1 =[WHITE 3+]# comment" (non-pink suffix!)
         let hasEditableInlineGap = false;
+        let inlineGapMeta = null;
         const fullLineTxt = (el.textContent || "").replace(/\u200B/g, "").replace(/\u00A0/g, " ");
-        if (!hasPinkBg && hasPinkChild && !/^\s*(\/\/|\/\*|#)/.test(fullLineTxt) && /\S\s{3,}\S/.test(fullLineTxt)) {
-          let seenPinkBefore = false;
-          let gapCharsAfterPink = 0;
-          for (const node of Array.from(el.childNodes)) {
-            const txt = (node.textContent || "").replace(/\u200B/g, "").replace(/\u00A0/g, " ");
-            if (!txt) continue;
-            let nodeIsPink = false;
-            if (node.nodeType === 1) {
-              const nBg = ed.win.getComputedStyle(node).backgroundColor || "";
-              nodeIsPink =
-                isPinkLockedBg(nBg) ||
-                Array.from(node.querySelectorAll("span")).some((s) =>
-                  isPinkLockedBg(ed.win.getComputedStyle(s).backgroundColor || "")
-                );
-            }
-            if (nodeIsPink && txt.trim().length > 0) {
-              if (seenPinkBefore && gapCharsAfterPink >= 3) {
-                hasEditableInlineGap = true;
-                break;
-              }
-              seenPinkBefore = true;
-              gapCharsAfterPink = 0;
-            } else if (seenPinkBefore && /^[ \t]+$/.test(txt)) {
-              gapCharsAfterPink += txt.length;
-            } else if (seenPinkBefore && txt.trim().length > 0) {
-              gapCharsAfterPink = 0;
-            }
+        if (!hasPinkBg && hasPinkChild && !/^\s*(\/\/|\/\*|#)/.test(fullLineTxt) && /\S[ \t]{3,}(?:\S|$)/.test(fullLineTxt)) {
+          const gapM = fullLineTxt.match(/^([ \t]*\S.*?)([ \t]{3,})(\S.*)?$/);
+          if (gapM) {
+            hasEditableInlineGap = true;
+            inlineGapMeta = {
+              gapStart: gapM[1].length,
+              gapEnd: gapM[1].length + gapM[2].length,
+              lockedPrefix: gapM[1],
+              lockedSuffix: gapM[3] || ""
+            };
           }
         }
 
@@ -1693,14 +1716,16 @@
           } catch {}
         }
 
-        if (hasEditableInlineGap) {
+        if (hasEditableInlineGap && inlineGapMeta) {
           partialLockedSet.add(lineNum);
+          inlineBlankMap.set(lineNum, { type: "inline_blank", line: lineNum, ...inlineGapMeta });
         } else if (isExplicitReadOnly || hasPinkBg || hasPinkChild) {
           lockedSet.add(lineNum);
         }
       });
     }
 
+    const inlineBlankMap = new Map();
     if (scroller && scroller.scrollHeight > scroller.clientHeight + 40) {
       const origScrollTop = scroller.scrollTop;
       const maxScroll = scroller.scrollHeight - scroller.clientHeight;
@@ -1719,7 +1744,8 @@
 
     return {
       lockedLines: Array.from(lockedSet).sort((a, b) => a - b),
-      partialLockedLines: Array.from(partialLockedSet).sort((a, b) => a - b)
+      partialLockedLines: Array.from(partialLockedSet).sort((a, b) => a - b),
+      inlineBlanks: Array.from(inlineBlankMap.values()).sort((a, b) => a.line - b.line)
     };
   }
 
@@ -1730,12 +1756,13 @@
 
   async function readEditorStateLocal({ light = false } = {}) {
     const ed = detectEditorRecursive(document, window);
-    if (!ed) return { found: false, type: "none", code: "", language: "", lockedLines: [], partialLockedLines: [], problemText: "" };
+    if (!ed) return { found: false, type: "none", code: "", language: "", lockedLines: [], partialLockedLines: [], inlineBlanks: [], problemText: "" };
 
     let code = "";
     let language = detectLanguageFromDoc(ed.doc);
     let lockedLines = [];
     let partialLockedLines = [];
+    let inlineBlanks = [];
 
     if (ed.type === "cm6") {
       if (ed.editor && ed.editor.state && ed.editor.state.doc) {
@@ -1748,6 +1775,7 @@
         const lockInfo = await scanLineLocksCM6(ed);
         lockedLines = lockInfo.lockedLines;
         partialLockedLines = lockInfo.partialLockedLines;
+        inlineBlanks = lockInfo.inlineBlanks || [];
       }
     } else if (ed.type === "ace") {
       code = ed.editor.getValue() || "";
@@ -1764,7 +1792,8 @@
 
     const problemText = extractProblemTextFromDoc(ed.doc);
     const hasMultiLangDropdown = hasMultiLangDropdownInDoc(ed.doc);
-    return { found: true, type: ed.type, code, language, lockedLines, partialLockedLines, problemText, hasMultiLangDropdown };
+    const isTimerGreen = isTimerGreenInDoc(ed.doc) || isTimerGreenInDoc(document);
+    return { found: true, type: ed.type, code, language, lockedLines, partialLockedLines, inlineBlanks, problemText, hasMultiLangDropdown, isTimerGreen };
   }
 
   function emitProgressToTop(pct, doneChars, totalChars) {
@@ -1865,14 +1894,29 @@
           to = doc.line(adjEnd).to;
           oldLineCount = adjEnd - adjStart + 1;
 
-          // INLINE PARTIAL-LOCK TRIMMING (e.g. "with       as file:" -> "with open(filename, 'r') as file:"):
-          // Trim identical prefix & suffix characters so pink locked tokens on the SAME line are NEVER touched!
+          // INLINE PARTIAL-LOCK TRIMMING (e.g. "    line1 =       # Fill in..." -> types ONLY " file.readline() " in the white gap!):
+          // Trim identical prefix & suffix characters so pink locked tokens & comments on the SAME line are NEVER touched!
           const existingSlice = doc.sliceString(from, to);
           if (adjStart === adjEnd) {
-            const gapMatch = existingSlice.match(/^([ \t]*\S+\s)\s{2,}(\s*\S.*)$/);
-            if (gapMatch && !text.trim().startsWith(gapMatch[1].trim())) {
-              const suf = gapMatch[2].startsWith(" ") ? gapMatch[2] : " " + gapMatch[2];
-              text = gapMatch[1] + text.trim() + suf;
+            const gapMatch = existingSlice.match(/^([ \t]*\S.*?)([ \t]{3,})(\S.*)?$/);
+            if (gapMatch) {
+              const pref = gapMatch[1];
+              const suf = gapMatch[3] || "";
+              let inner = typeof edit.innerCode === "string" ? edit.innerCode.trim() : text.trim();
+              const prefTrim = pref.trim();
+              const sufTrim = suf.trim();
+              if (prefTrim && inner.startsWith(prefTrim)) {
+                inner = inner.slice(prefTrim.length).trim();
+              }
+              if (sufTrim && inner.endsWith(sufTrim)) {
+                inner = inner.slice(0, inner.length - sufTrim.length).trim();
+              } else if (sufTrim.startsWith("#")) {
+                inner = inner.replace(/\s*#.*$/, "").trim();
+              }
+              const needPreSpace = !/[.(=\[]$/.test(pref) && !pref.endsWith(" ");
+              const needSufSpace = Boolean(suf) && !/^[,.):\]\s]/.test(suf);
+              text = pref + (needPreSpace ? " " : "") + inner + (needSufSpace ? " " : "") + suf;
+              console.log(`[CT-EDIT] Line ${adjStart} (inline_blank): inserted ${JSON.stringify(inner)} at ch ${pref.length}..${pref.length + gapMatch[2].length}`);
             }
           }
           let p = 0;
@@ -1960,11 +2004,15 @@
         async function insertCharExec(pos, ch) {
           const safeP = Math.max(0, Math.min(pos, view.state.doc.length));
           const beforeLen = view.state.doc.length;
+          if (ch === "\n") {
+            // Never dispatch Enter keydown on \n — CM6 auto-indent would double the indentation we type!
+            return insertCharDispatch(safeP, "\n", true);
+          }
           try {
             placeDomCaretAt(safeP);
-            ed.contentEl?.dispatchEvent(new KeyboardEvent("keydown", { key: ch === "\n" ? "Enter" : ch === "\t" ? "Tab" : ch, bubbles: true, cancelable: true }));
+            ed.contentEl?.dispatchEvent(new KeyboardEvent("keydown", { key: ch === "\t" ? "Tab" : ch, bubbles: true, cancelable: true }));
             ed.doc.execCommand("insertText", false, ch);
-            ed.contentEl?.dispatchEvent(new KeyboardEvent("keyup", { key: ch === "\n" ? "Enter" : ch === "\t" ? "Tab" : ch, bubbles: true }));
+            ed.contentEl?.dispatchEvent(new KeyboardEvent("keyup", { key: ch === "\t" ? "Tab" : ch, bubbles: true }));
           } catch {}
           // Wait for CodeMirror 6's MutationObserver to flush DOM edit into view.state.doc!
           await sleep(14);

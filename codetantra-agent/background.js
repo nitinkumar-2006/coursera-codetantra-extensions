@@ -55,14 +55,98 @@ function waitForTabComplete(tabId, timeoutMs = 12000) {
   });
 }
 
-async function getOrCreateGeminiTab() {
-  const tabs = await withTimeout(chrome.tabs.query({ url: "https://gemini.google.com/*" }), 4000, "tabs.query");
-  if (tabs && tabs.length > 0) {
-    const picked = tabs.find((t) => !t.discarded && t.status === "complete") || tabs[0];
-    if (picked.status !== "complete") {
-      await waitForTabComplete(picked.id, 10000);
+const SUBJECT_CHAT_KEY = "geminiSubjectChats";
+const VALID_GEMINI_CHAT_RE = /^https:\/\/gemini\.google\.com\/app\/[a-zA-Z0-9_-]{6,}/;
+
+async function getSubjectChats() {
+  try {
+    const res = await chrome.storage.local.get(SUBJECT_CHAT_KEY);
+    return (res && res[SUBJECT_CHAT_KEY] && typeof res[SUBJECT_CHAT_KEY] === "object") ? res[SUBJECT_CHAT_KEY] : {};
+  } catch {
+    return {};
+  }
+}
+
+async function getSubjectChatUrl(subject) {
+  if (!subject) return "";
+  const map = await getSubjectChats();
+  const url = map[subject] || "";
+  return VALID_GEMINI_CHAT_RE.test(url) ? url : "";
+}
+
+async function setSubjectChatUrl(subject, url) {
+  if (!subject || !VALID_GEMINI_CHAT_RE.test(url || "")) return;
+  try {
+    const map = await getSubjectChats();
+    if (map[subject] === url) return;
+    map[subject] = url;
+    await chrome.storage.local.set({ [SUBJECT_CHAT_KEY]: map });
+    console.log("[CT-GEMINI] Saved subject chat URL", { subject, url });
+  } catch {}
+}
+
+async function clearSubjectChatUrl(subject) {
+  if (!subject) return;
+  try {
+    const map = await getSubjectChats();
+    if (map[subject]) {
+      delete map[subject];
+      await chrome.storage.local.set({ [SUBJECT_CHAT_KEY]: map });
+      console.log("[CT-GEMINI] Cleared invalid subject chat URL", { subject });
     }
-    return picked;
+  } catch {}
+}
+
+async function getOrCreateGeminiTab(subject = "other") {
+  const savedUrl = await getSubjectChatUrl(subject);
+  const tabs = await withTimeout(chrome.tabs.query({ url: "https://gemini.google.com/*" }), 4000, "tabs.query");
+
+  if (savedUrl) {
+    // 1. Reuse already-open tab on this exact subject's chat URL
+    const exactTab = (tabs || []).find((t) => !t.discarded && (t.url || "").startsWith(savedUrl));
+    if (exactTab) {
+      if (exactTab.status !== "complete") await waitForTabComplete(exactTab.id, 10000);
+      return { tab: exactTab, usedSavedUrl: true };
+    }
+    // 2. Navigate existing Gemini tab (or create one) to the saved subject chat URL
+    if (tabs && tabs.length > 0) {
+      const targetTab = tabs.find((t) => !t.discarded) || tabs[0];
+      await withTimeout(chrome.tabs.update(targetTab.id, { url: savedUrl, active: true }), 4000, "tabs.update");
+      await waitForTabComplete(targetTab.id, 12000);
+      await sleep(1200);
+      const refreshed = await chrome.tabs.get(targetTab.id).catch(() => null);
+      if (refreshed && VALID_GEMINI_CHAT_RE.test(refreshed.url || "")) {
+        return { tab: refreshed, usedSavedUrl: true };
+      }
+      // Saved chat was deleted or bounced back to /app -> clear and create fresh primary chat once
+      await clearSubjectChatUrl(subject);
+      await waitForTabComplete(targetTab.id, 10000);
+      await sleep(800);
+      return { tab: targetTab, usedSavedUrl: false };
+    }
+    const created = await withTimeout(chrome.tabs.create({ url: savedUrl, active: true }), 5000, "tabs.create");
+    await waitForTabComplete(created.id, 12000);
+    await sleep(1500);
+    const refreshed = await chrome.tabs.get(created.id).catch(() => created);
+    if (!VALID_GEMINI_CHAT_RE.test(refreshed?.url || "")) {
+      await clearSubjectChatUrl(subject);
+      return { tab: refreshed || created, usedSavedUrl: false };
+    }
+    return { tab: refreshed || created, usedSavedUrl: true };
+  }
+
+  // No saved URL for this subject yet -> use a fresh /app tab (never overwrite another subject's chat!)
+  if (tabs && tabs.length > 0) {
+    const bareAppTab = tabs.find((t) => !t.discarded && !VALID_GEMINI_CHAT_RE.test(t.url || ""));
+    if (bareAppTab) {
+      if (bareAppTab.status !== "complete") await waitForTabComplete(bareAppTab.id, 10000);
+      return { tab: bareAppTab, usedSavedUrl: false };
+    }
+    const navTab = tabs.find((t) => !t.discarded) || tabs[0];
+    await withTimeout(chrome.tabs.update(navTab.id, { url: "https://gemini.google.com/app", active: true }), 4000, "tabs.update");
+    await waitForTabComplete(navTab.id, 12000);
+    await sleep(1400);
+    return { tab: navTab, usedSavedUrl: false };
   }
 
   const created = await withTimeout(
@@ -72,7 +156,7 @@ async function getOrCreateGeminiTab() {
   );
   await waitForTabComplete(created.id, 12000);
   await sleep(1500);
-  return created;
+  return { tab: created, usedSavedUrl: false };
 }
 
 // Executed directly inside https://gemini.google.com/* via chrome.scripting.executeScript
@@ -182,20 +266,8 @@ async function submitPromptDirect(promptText, screenshot = null, isNewQuestion =
       return /<<<SLOT\s*\d+>>>/i.test(t) || (t.includes("{") && t.includes("}") && (t.includes('"slots"') || t.includes('"edits"') || t.includes('"answers"') || t.includes('"verified"')));
     }).length;
 
-  // Keep SAME chat for all retries of the SAME question; only click 'New chat' when moving to a brand-new CodeTantra question!
-  const initialNodes = getRespNodes();
-  if (isNewQuestion && initialNodes.length >= 2) {
-    const newChatBtn = qDeep('a, button, [role="button"]').find((el) => {
-      if (!isVis(el)) return false;
-      const t = (el.innerText || el.getAttribute("aria-label") || "").trim().toLowerCase();
-      return t === "new chat" || t.startsWith("new chat");
-    });
-    if (newChatBtn) {
-      if (newChatBtn.tagName === "A") newChatBtn.removeAttribute("target");
-      newChatBtn.click();
-      await wait(900);
-    }
-  }
+  // Persistent subject-wise chat: never click 'New chat' inside a saved subject chat!
+  // Always capture beforeCount strictly BEFORE clicking Send.
 
   let inputEl = null;
   for (let i = 0; i < 12; i++) {
@@ -427,7 +499,7 @@ function pollResponseDirect(beforeCount, beforeLastText, beforeJsonCount) {
     if (/<<<SLOT\s*\d+>>>/i.test(fullText)) return fullText;
     for (let i = blocks.length - 1; i >= 0; i--) {
       const t = (blocks[i].textContent || blocks[i].innerText || "").trim();
-      if (t.includes("{") && t.includes("}") && (t.includes('"slots"') || t.includes('"edits"') || t.includes('"answers"') || t.includes('"verified"'))) {
+      if (t.includes("{") && t.includes("}") && (/"1"\s*:/.test(t) || t.includes('"slots"') || t.includes('"edits"') || t.includes('"answers"') || t.includes('"verified"'))) {
         return t;
       }
     }
@@ -461,7 +533,7 @@ function pollResponseDirect(beforeCount, beforeLastText, beforeJsonCount) {
 
 let lastGeminiQuestionUrl = "";
 
-async function askGeminiWebTab(prompt, callerTabId, screenshot = null, questionUrl = "") {
+async function askGeminiWebTab(prompt, callerTabId, screenshot = null, questionUrl = "", subject = "other") {
   const keepAlive = setInterval(() => {
     try {
       chrome.runtime.getPlatformInfo(() => {});
@@ -472,14 +544,17 @@ async function askGeminiWebTab(prompt, callerTabId, screenshot = null, questionU
   if (questionUrl) lastGeminiQuestionUrl = questionUrl;
 
   let switchedToGemini = false;
+  let activeGeminiTabId = null;
   try {
-    notifyProgress(callerTabId, "1/4 Gemini tab par jaa raha hoon...");
-    const tab = await getOrCreateGeminiTab();
+    notifyProgress(callerTabId, `1/4 Gemini (${subject}) chat par jaa raha hoon...`);
+    const tabRes = await getOrCreateGeminiTab(subject);
+    const tab = tabRes?.tab;
     if (!tab || !tab.id) {
       return { ok: false, error: "gemini.google.com tab open nahi ho paya." };
     }
+    activeGeminiTabId = tab.id;
 
-    notifyProgress(callerTabId, screenshot ? "2/4 Live screenshot + question Gemini Web mein paste kar raha hoon..." : "2/4 Pura question + code Gemini mein paste kar raha hoon...");
+    notifyProgress(callerTabId, screenshot ? `2/4 Live screenshot + question Gemini (${subject}) mein paste kar raha hoon...` : `2/4 Question Gemini (${subject}) chat mein paste kar raha hoon...`);
     await withTimeout(chrome.tabs.update(tab.id, { active: true }), 3000, "tabs.update");
     switchedToGemini = true;
     await sleep(250);
@@ -526,7 +601,7 @@ async function askGeminiWebTab(prompt, callerTabId, screenshot = null, questionU
       notifyProgress(
         callerTabId,
         lastSeen
-          ? `3/4 Gemini answer likh raha hai (${lastSeen.length} chars, ${elapsed}s)...`
+          ? `3/4 Gemini (${subject}) answer likh raha hai (${lastSeen.length} chars, ${elapsed}s)...`
           : `3/4 Pura question bhej diya ✓ — reply ka wait (${elapsed}s)...`
       );
 
@@ -549,19 +624,30 @@ async function askGeminiWebTab(prompt, callerTabId, screenshot = null, questionU
       if (!poll || !poll.ok) continue;
       const curText = (poll.text || "").trim();
       const prevText = (beforeLastText || "").trim();
+      console.log("[CT-GEMINI] poll", { subject, elapsed, hasNew: poll.hasNew, generating: poll.generating, len: curText.length });
       if (poll.hasNew && curText && (poll.isNewNode || curText !== prevText)) {
-        const hasFullSlot = /<<<SLOT\s*\d+>>>/i.test(curText) && /<<<END_SLOT\s*\d+>>>/i.test(curText);
-        if (hasFullSlot) {
-          // Closing <<<END_SLOT N>>> tag is already written — wait 1 short tick and return IMMEDIATELY (zero 60s+ hangs!)
-          await sleep(600);
+        const hasFullSlot = /<<<\s*SLOT\s*\d+\s*>>>/i.test(curText) && /<<<\s*END_SLOT\s*\d+\s*>>>/i.test(curText);
+        let hasFullJson = false;
+        if (!poll.generating && curText.includes("{") && curText.includes("}")) {
+          try {
+            const parsedCheck = JSON.parse(curText.replace(/^```(?:json)?\s*|\s*```$/gi, "").trim());
+            if (parsedCheck && typeof parsedCheck === "object" && Object.keys(parsedCheck).length > 0) hasFullJson = true;
+          } catch {}
+        }
+        if ((hasFullSlot && !poll.generating) || hasFullJson) {
+          await sleep(450);
+          const updatedTab = await chrome.tabs.get(tab.id).catch(() => null);
+          if (updatedTab?.url) await setSubjectChatUrl(subject, updatedTab.url);
           notifyProgress(callerTabId, "4/4 Answer mil gaya ✓ — CodeTantra par wapas aa raha hoon...");
-          return { ok: true, model: "Gemini Web (Free)", rawText: curText };
+          return { ok: true, model: `Gemini Web (${subject})`, rawText: curText };
         }
         if (curText === lastSeen) {
           unchangedTicks++;
-          if ((!poll.generating && unchangedTicks >= 2) || unchangedTicks >= 5) {
+          if ((!poll.generating && unchangedTicks >= 2) || unchangedTicks >= 25) {
+            const updatedTab = await chrome.tabs.get(tab.id).catch(() => null);
+            if (updatedTab?.url) await setSubjectChatUrl(subject, updatedTab.url);
             notifyProgress(callerTabId, "4/4 Answer mil gaya ✓ — CodeTantra par wapas aa raha hoon...");
-            return { ok: true, model: "Gemini Web (Free)", rawText: curText };
+            return { ok: true, model: `Gemini Web (${subject})`, rawText: curText };
           }
         } else {
           lastSeen = curText;
@@ -571,257 +657,25 @@ async function askGeminiWebTab(prompt, callerTabId, screenshot = null, questionU
     }
 
     if (lastSeen && lastSeen !== beforeLastText) {
-      return { ok: true, model: "Gemini Web (Free)", rawText: lastSeen };
+      const updatedTab = await chrome.tabs.get(tab.id).catch(() => null);
+      if (updatedTab?.url) await setSubjectChatUrl(subject, updatedTab.url);
+      return { ok: true, model: `Gemini Web (${subject})`, rawText: lastSeen };
     }
     return { ok: false, error: "Gemini Web se 120s mein reply nahi aaya — Gemini tab mein 'Neon' ko 'Fast' par switch karo ya green 'Web' dabakar 'API' mode chalao." };
   } catch (err) {
     return { ok: false, error: `Gemini Web error: ${err?.message || err}` };
   } finally {
     clearInterval(keepAlive);
+    if (activeGeminiTabId && subject) {
+      try {
+        const finalTab = await chrome.tabs.get(activeGeminiTabId);
+        if (finalTab?.url) await setSubjectChatUrl(subject, finalTab.url);
+      } catch {}
+    }
     if (switchedToGemini && callerTabId) {
       try {
         await chrome.tabs.update(callerTabId, { active: true });
       } catch {}
-    }
-  }
-}
-
-// ---------------- Smart ChatGPT Web Fallback (when Gemini fails 2x on same error) ----------------
-async function getOrCreateChatGptTab() {
-  const tabs = await withTimeout(chrome.tabs.query({ url: "https://chatgpt.com/*" }), 4000, "tabs.query");
-  if (tabs && tabs.length > 0) {
-    const picked = tabs.find((t) => !t.discarded && t.status === "complete") || tabs[0];
-    if (picked.status !== "complete") await waitForTabComplete(picked.id, 10000);
-    return picked;
-  }
-  const created = await withTimeout(chrome.tabs.create({ url: "https://chatgpt.com/", active: true }), 5000, "tabs.create");
-  await waitForTabComplete(created.id, 12000);
-  await sleep(1800);
-  return created;
-}
-
-async function submitChatGptDirect(promptText, isNewQuestion = true) {
-  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-  const isVis = (el) => {
-    if (!el) return false;
-    const st = window.getComputedStyle(el);
-    if (st.display === "none" || st.visibility === "hidden" || parseFloat(st.opacity) === 0) return false;
-    const r = el.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
-  };
-  const findInput = () => {
-    const sels = ['#prompt-textarea', 'div[contenteditable="true"][id="prompt-textarea"]', 'div[contenteditable="true"][role="textbox"]', 'textarea[name="prompt-textarea"]', 'textarea'];
-    for (const s of sels) {
-      const hit = Array.from(document.querySelectorAll(s)).find(isVis);
-      if (hit) return hit;
-    }
-    return null;
-  };
-  const getNodes = () => Array.from(document.querySelectorAll('[data-message-author-role="assistant"]')).filter((n) => (n.textContent || "").trim().length > 0);
-
-  // Start fresh New Chat only when switching to a new CodeTantra question (keep same ChatGPT thread on retries!)
-  if (isNewQuestion && (getNodes().length > 0 || /\/c\//.test(location.pathname))) {
-    const newChatBtn = Array.from(document.querySelectorAll('a[href="/"], button[aria-label*="New chat" i], a, button')).find((el) => {
-      if (!isVis(el)) return false;
-      const meta = (el.innerText || el.getAttribute("aria-label") || "").trim().toLowerCase();
-      return meta === "new chat" || meta.startsWith("new chat") || el.getAttribute("href") === "/";
-    });
-    if (newChatBtn) {
-      if (newChatBtn.tagName === "A") newChatBtn.removeAttribute("target");
-      newChatBtn.click();
-      await wait(900);
-    }
-  }
-
-  let inputEl = null;
-  for (let i = 0; i < 12; i++) {
-    inputEl = findInput();
-    if (inputEl) break;
-    await wait(250);
-  }
-  if (!inputEl) return { ok: false, error: "chatgpt.com par chat box nahi mila (login check karo)." };
-
-  const beforeNodes = getNodes();
-  const beforeCount = beforeNodes.length;
-  const beforeLastText = beforeCount > 0 ? (beforeNodes[beforeCount - 1].textContent || "").trim() : "";
-
-  inputEl.click();
-  inputEl.focus();
-  await wait(150);
-  const getCurLen = () =>
-    inputEl.tagName === "TEXTAREA"
-      ? (inputEl.value || "").trim().length
-      : (inputEl.innerText || inputEl.textContent || "").trim().length;
-  const minLen = Math.min(180, Math.floor(promptText.length * 0.4));
-
-  if (inputEl.tagName === "TEXTAREA") {
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
-    if (setter) setter.call(inputEl, promptText);
-    else inputEl.value = promptText;
-    inputEl.dispatchEvent(new Event("input", { bubbles: true }));
-  } else {
-    // Method 1: Native execCommand insertText (works cleanly with ChatGPT ProseMirror!)
-    try {
-      document.execCommand("selectAll", false, null);
-      document.execCommand("insertText", false, promptText);
-    } catch {}
-    await wait(220);
-    // Method 2: ClipboardEvent paste
-    if (getCurLen() < minLen) {
-      try {
-        const dt = new DataTransfer();
-        dt.setData("text/plain", promptText);
-        inputEl.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: dt }));
-      } catch {}
-      await wait(220);
-    }
-    // Method 3: ProseMirror <p> paragraphs
-    if (getCurLen() < minLen) {
-      while (inputEl.firstChild) inputEl.removeChild(inputEl.firstChild);
-      for (const ln of promptText.replace(/\r\n/g, "\n").split("\n")) {
-        const p = document.createElement("p");
-        if (ln) p.textContent = ln;
-        else p.appendChild(document.createElement("br"));
-        inputEl.appendChild(p);
-      }
-      inputEl.dispatchEvent(new InputEvent("input", { bubbles: true, data: promptText, inputType: "insertFromPaste" }));
-      await wait(220);
-    }
-  }
-  if (getCurLen() < minLen) {
-    return { ok: false, error: `ChatGPT input box mein prompt paste nahi hua (${getCurLen()}/${promptText.length} chars).` };
-  }
-  const findChatGptSend = () => {
-    const direct = Array.from(
-      document.querySelectorAll(
-        'button#composer-submit-button, button[data-testid="send-button"], button[aria-label*="Send prompt" i], button[aria-label*="Send message" i], button[aria-label="Send" i], form button[type="submit"]'
-      )
-    ).find((b) => isVis(b) && !b.disabled && b.getAttribute("aria-disabled") !== "true");
-    if (direct) return direct;
-    const form = inputEl.closest("form");
-    if (form) {
-      const btns = Array.from(form.querySelectorAll("button")).filter((b) => {
-        if (!isVis(b) || b.disabled || b.getAttribute("aria-disabled") === "true") return false;
-        const meta = (b.getAttribute("aria-label") || b.innerText || "").toLowerCase();
-        return !/(attach|upload|plus|add|mic|voice|think|search|reason|stop)/i.test(meta);
-      });
-      if (btns.length) return btns[btns.length - 1];
-    }
-    return null;
-  };
-  const clickReal = (el) => {
-    try {
-      el.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
-      el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
-      el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
-    } catch {}
-    el.click();
-  };
-  let sendBtn = null;
-  for (let i = 0; i < 10; i++) {
-    sendBtn = findChatGptSend();
-    if (sendBtn) break;
-    await wait(200);
-  }
-  if (sendBtn) {
-    clickReal(sendBtn);
-  } else {
-    inputEl.focus();
-    inputEl.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-  }
-  await wait(700);
-  if (getCurLen() > 25) {
-    const retryBtn = findChatGptSend();
-    if (retryBtn) clickReal(retryBtn);
-    inputEl.focus();
-    inputEl.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-    try { inputEl.closest("form")?.requestSubmit?.(); } catch {}
-    await wait(500);
-  }
-  return { ok: true, beforeCount, beforeLastText };
-}
-
-function pollChatGptDirect(beforeCount, beforeLastText) {
-  const generating = Boolean(document.querySelector('button[data-testid="stop-button"], button[aria-label*="Stop" i]'));
-  let nodes = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]')).filter((n) => (n.textContent || "").trim().length > 0);
-  if (!nodes.length) {
-    nodes = Array.from(document.querySelectorAll('article[data-testid^="conversation-turn-"] .markdown')).filter((n) => (n.textContent || "").trim().length > 0);
-  }
-  const hasNewNode = nodes.length > beforeCount;
-  const latest = hasNewNode ? nodes[nodes.length - 1] : null;
-  let text = "";
-  if (latest) {
-    const blocks = Array.from(latest.querySelectorAll("pre code, pre"));
-    for (let i = blocks.length - 1; i >= 0; i--) {
-      const t = (blocks[i].textContent || "").replace(/^\n+|\n+$/g, "");
-      if (/<<<SLOT\s*\d+>>>/i.test(t)) { text = t; break; }
-    }
-    if (!text) {
-      const full = (latest.innerText || latest.textContent || "").trim();
-      if (/<<<SLOT\s*\d+>>>/i.test(full)) text = full;
-      else if (blocks.length) {
-        const best = blocks.map((b) => (b.textContent || "").replace(/^\n+|\n+$/g, "")).sort((a, b) => b.length - a.length)[0];
-        if (best && best.trim().length > 20) text = "```\n" + best + "\n```";
-      } else text = full;
-    }
-  }
-  return { ok: true, hasNew: hasNewNode && Boolean(text), isNewNode: hasNewNode, generating, text };
-}
-
-let lastChatGptQuestionUrl = "";
-
-async function askChatGptWebTab(prompt, callerTabId, questionUrl = "") {
-  const isNewQuestion = Boolean(!lastChatGptQuestionUrl || (questionUrl && questionUrl !== lastChatGptQuestionUrl));
-  if (questionUrl) lastChatGptQuestionUrl = questionUrl;
-  let switched = false;
-  try {
-    notifyProgress(callerTabId, "Fallback: ChatGPT (chatgpt.com) se second-opinion le raha hoon...");
-    const tab = await getOrCreateChatGptTab();
-    if (!tab || !tab.id) return { ok: false, error: "chatgpt.com tab open nahi hua." };
-    await withTimeout(chrome.tabs.update(tab.id, { active: true }), 3000, "tabs.update");
-    switched = true;
-    await sleep(300);
-    const subArr = await withTimeout(chrome.scripting.executeScript({ target: { tabId: tab.id }, func: submitChatGptDirect, args: [prompt, isNewQuestion] }), 14000, "submitChatGptDirect");
-    const subRes = subArr?.[0]?.result;
-    if (!subRes || !subRes.ok) return { ok: false, error: subRes?.error || "ChatGPT submit failed." };
-    const { beforeCount = 0, beforeLastText = "" } = subRes;
-    let lastSeen = "";
-    let unchanged = 0;
-    const startTs = Date.now();
-    await sleep(1500);
-    while (Date.now() - startTs < 95000) {
-      await sleep(750);
-      const elapsed = Math.round((Date.now() - startTs) / 1000);
-      notifyProgress(callerTabId, `ChatGPT reply (${lastSeen.length} chars, ${elapsed}s)...`);
-      let poll = null;
-      try {
-        const pArr = await withTimeout(chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pollChatGptDirect, args: [beforeCount, beforeLastText] }), 4000, "pollChatGptDirect");
-        poll = pArr?.[0]?.result;
-      } catch { continue; }
-      if (!poll || !poll.ok) continue;
-      const curText = (poll.text || "").trim();
-      if (poll.hasNew && curText && (poll.isNewNode || curText !== beforeLastText.trim())) {
-        if (/<<<SLOT\s*\d+>>>/i.test(curText) && /<<<END_SLOT\s*\d+>>>/i.test(curText)) {
-          await sleep(600);
-          return { ok: true, model: "ChatGPT Web (Fallback)", rawText: curText };
-        }
-        if (curText === lastSeen) {
-          unchanged++;
-          if ((!poll.generating && unchanged >= 2) || unchanged >= 5) {
-            return { ok: true, model: "ChatGPT Web (Fallback)", rawText: curText };
-          }
-        } else {
-          lastSeen = curText;
-          unchanged = 0;
-        }
-      }
-    }
-    return lastSeen ? { ok: true, model: "ChatGPT Web (Fallback)", rawText: lastSeen } : { ok: false, error: "ChatGPT timeout." };
-  } catch (err) {
-    return { ok: false, error: `ChatGPT fallback error: ${err?.message || err}` };
-  } finally {
-    if (switched && callerTabId) {
-      try { await chrome.tabs.update(callerTabId, { active: true }); } catch {}
     }
   }
 }
@@ -845,13 +699,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg.type === "GEMINI_WEB_ASK") {
-    askGeminiWebTab(msg.prompt || "", sender?.tab?.id, msg.screenshot || null, msg.questionUrl || "")
-      .then((res) => sendResponse(res))
-      .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
-    return true;
-  }
-  if (msg.type === "CHATGPT_WEB_ASK") {
-    askChatGptWebTab(msg.prompt || "", sender?.tab?.id, msg.questionUrl || "")
+    askGeminiWebTab(msg.prompt || "", sender?.tab?.id, msg.screenshot || null, msg.questionUrl || "", msg.subject || "other")
       .then((res) => sendResponse(res))
       .catch((err) => sendResponse({ ok: false, error: String(err?.message || err) }));
     return true;

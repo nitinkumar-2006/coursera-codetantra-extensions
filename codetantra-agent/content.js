@@ -50,6 +50,7 @@ const MAX_FIX_ATTEMPTS = 20;
 let autoMode = false;
 let autoInterval = null;
 let isBusy = false;
+let aiRequestInFlight = false;
 let tickInFlight = false;
 let solvedUrls = new Set();
 let failedUrls = new Set();
@@ -314,7 +315,7 @@ function createPanel() {
     <div style="font-weight: 600; margin-bottom: 10px; display:flex; justify-content:space-between; align-items:center; gap:6px;">
       <span style="display:flex; align-items:center; gap:5px; flex-wrap:nowrap;">
         <span style="color:#ffffff; white-space:nowrap; font-size:13px;">CodeTantra</span>
-        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v15.5</span>
+        <span style="font-size:10px; background:rgba(10,12,18,0.65); border:1px solid rgba(255,255,255,0.22); color:#e5e7eb; padding:2px 6px; border-radius:6px;">v16.6</span>
         <button id="ct-mode-btn" class="ct-icon-btn ct-mode-active" title="Active AI Mode (click to toggle Web / API)">Web</button>
       </span>
       <span style="display:flex; align-items:center; gap:6px;">
@@ -732,24 +733,12 @@ function extractJsonFromText(raw) {
   return lastBrace > firstBrace ? cleaned.slice(firstBrace, lastBrace + 1) : cleaned;
 }
 
-async function callChatGptWeb(prompt) {
-  setStatus("AI: ChatGPT Fallback...", "#93c5fd");
-  setOutput("Gemini same error par fasa tha — ChatGPT (chatgpt.com) se second opinion laa raha hoon...");
-  try {
-    const res = await new Promise((resolve) => {
-      let done = false;
-      const finish = (v) => { if (!done) { done = true; clearTimeout(t); resolve(v); } };
-      const t = setTimeout(() => finish({ ok: false, error: "ChatGPT Web timeout (100s)." }), 100000);
-      chrome.runtime.sendMessage({ type: "CHATGPT_WEB_ASK", prompt, questionUrl: window.location.href }, (reply) => {
-        if (chrome.runtime.lastError) finish({ ok: false, error: chrome.runtime.lastError.message });
-        else finish(reply || { ok: false, error: "ChatGPT worker se reply nahi mila." });
-      });
-    });
-    if (res && res.ok && res.rawText) return { ok: true, model: res.model || "ChatGPT Web", rawText: res.rawText };
-    return { ok: false, error: res?.error || "ChatGPT Web failed." };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
+function detectSubject(langHint = "", textHint = "") {
+  const combined = `${langHint} ${textHint} ${document.title || ""}`.toLowerCase();
+  if (/\bpython\b|\.py\b|\bdef\s+\w+|\breadline\(|\b__init__\b/i.test(combined)) return "python";
+  if (/\bjava\b|\.java\b|\bpublic\s+class\b|\bsystem\.out\b/i.test(combined)) return "java";
+  if (/\b(html|html5|css|css3|javascript|webtech|web\s*tech|dom)\b|\.(html|htm|css|js)\b/i.test(combined)) return "webtech";
+  return "other";
 }
 
 async function captureCleanTabScreenshot() {
@@ -776,22 +765,24 @@ async function captureCleanTabScreenshot() {
   }
 }
 
-async function callGemini(prompt, { expectJson = true, useChatGptFallback = false, forceApi = false, screenshot = null } = {}) {
-  // STRICT MODE ISOLATION: Web mode stays 100% on Web (Gemini Web + ChatGPT Web); API mode stays 100% on API!
-  if (useChatGptFallback && isWebMode() && !forceApi) {
-    const gptRes = await callChatGptWeb(prompt);
-    if (gptRes && gptRes.ok) return gptRes;
+async function callGemini(prompt, { expectJson = true, forceApi = false, screenshot = null, subject = "" } = {}) {
+  if (aiRequestInFlight) {
+    console.warn("[CT-FSM] Blocked overlapping AI call (single-flight lock active)");
+    return { ok: false, error: "AI request already in flight." };
   }
-  // ZERO-API-KEY WEB MODE: Route directly through logged-in gemini.google.com (with live screenshot pasted directly in Web chat!)
+  aiRequestInFlight = true;
+  try {
+  // STRICT MODE ISOLATION: Web mode stays 100% on Gemini Web (with subject-wise persistent chat); API mode stays 100% on API!
   if (isWebMode() && !forceApi) {
-    setStatus(screenshot ? "Web + Screenshot..." : "AI: Gemini Web...", "#93c5fd");
-    setOutput(screenshot ? "Live screenshot + error Gemini Web par bhej raha hoon..." : "Free Gemini Web (gemini.google.com) se answer laa raha hoon (0 API Key)...");
+    const resolvedSubject = subject || detectSubject("", prompt);
+    setStatus(screenshot ? "Web + Screenshot..." : `AI: Gemini (${resolvedSubject})`, "#93c5fd");
+    setOutput(screenshot ? `Live screenshot + error Gemini (${resolvedSubject}) chat par bhej raha hoon...` : `Gemini Web (${resolvedSubject} chat) se answer laa raha hoon...`);
     try {
       const res = await new Promise((resolve) => {
         let done = false;
         const finish = (v) => { if (!done) { done = true; clearTimeout(t); resolve(v); } };
         const t = setTimeout(() => finish({ ok: false, error: "Gemini Web timeout (130s) — Gemini tab mein 'Neon' se 'Fast' par switch karo ya 'API' mode chalao." }), 130000);
-        chrome.runtime.sendMessage({ type: "GEMINI_WEB_ASK", prompt, screenshot, questionUrl: window.location.href }, (reply) => {
+        chrome.runtime.sendMessage({ type: "GEMINI_WEB_ASK", prompt, screenshot, questionUrl: window.location.href, subject: resolvedSubject }, (reply) => {
           if (chrome.runtime.lastError) {
             finish({ ok: false, error: chrome.runtime.lastError.message });
           } else {
@@ -912,6 +903,9 @@ async function callGemini(prompt, { expectJson = true, useChatGptFallback = fals
         ? "Google Gemini server abhi high demand par hai (503) — 20s baad khud retry karega.\n"
         : "") + (shownLogs.join("\n") || "All Gemini models failed.")
   };
+  } finally {
+    aiRequestInFlight = false;
+  }
 }
 
 async function clickNextSlide() {
@@ -994,12 +988,12 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
     const flush = (endLn) => {
       if (start !== -1 && endLn >= start) {
         const sliceCode = lines.slice(start - 1, endLn).join("\n");
-        // When [INLINE_BLANK] lines exist, skip pure comment/blank slots so AI never writes code above the blank line!
         if (partialSet.size === 0 || !isCommentOrBlankOnly(sliceCode)) {
           slots.push({
             id: slots.length + 1,
             start_line: start,
             end_line: endLn,
+            isInline: false,
             code: sliceCode
           });
         }
@@ -1009,7 +1003,7 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
     for (let ln = 1; ln <= lines.length; ln++) {
       if (partialSet.has(ln)) {
         flush(ln - 1);
-        slots.push({ id: slots.length + 1, start_line: ln, end_line: ln, code: lines[ln - 1] });
+        slots.push({ id: slots.length + 1, start_line: ln, end_line: ln, isInline: true, code: lines[ln - 1] });
       } else if (!lockedSet.has(ln)) {
         if (start === -1) start = ln;
       } else {
@@ -1048,6 +1042,22 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
     .map((s) => s.code.replace(/\/\/.*|\/\*[\s\S]*?\*\/|#.*|\s+/g, "").length)
     .reduce((a, b) => a + b, 0);
 
+  // GREEN TIMER FAST-PATH: If question timer pill (e.g. 05:47) is already GREEN, just Submit once to verify & move Next without re-typing!
+  if (autoSubmitAndNext && edState.isTimerGreen) {
+    setStatus("Already Green ✓", "#86efac");
+    setOutput("Timer pill GREEN hai (already done) — Submit karke verify kar raha hoon, phir Next...");
+    await callBridge("CLICK_BUTTON", { targets: ["submit", "submit code", "compile & run"], preferEditorSubmit: true }, 2500);
+    await sleep(1200);
+    const checkGreenEval = await callBridge("EVAL_TESTS", {}, 7500);
+    if (!checkGreenEval || checkGreenEval.status !== "failed") {
+      solvedUrls.add(window.location.href);
+      setStatus("Green Verified ✓", "#86efac");
+      await sleep(450);
+      await clickNextSlide();
+      return;
+    }
+  }
+
   let existingEval = await callBridge("EVAL_TESTS", {}, 7500);
   // GUARD against stale 'Passed' badges carried over from the previous question in CodeTantra's SPA:
   // Only treat as Already Passed if the current editor actually has real solution code written (> 60 non-comment chars)!
@@ -1060,9 +1070,11 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
     return;
   }
 
-  // PRE-CHECK SUBMIT: If editor ALREADY has written code in [EDITABLE] slots and no test result is shown yet, Submit ONCE first to get the exact compiler/test-case error!
+  // PRE-CHECK SUBMIT: Never pre-submit if any [INLINE_BLANK] line still has an unfilled gap (e.g. starter code after Reset)!
+  const codeLinesNow = (edState.code || "").replace(/\r\n/g, "\n").split("\n");
+  const hasUnfilledBlank = (edState.partialLockedLines || []).some((ln) => /\S\s{3,}\S/.test(codeLinesNow[ln - 1] || ""));
   const preCheckMinChars = (edState.partialLockedLines || []).length > 0 ? 15 : 90;
-  if ((!existingEval || existingEval.status === "unknown") && existingEditableChars > preCheckMinChars) {
+  if (!hasUnfilledBlank && (!existingEval || existingEval.status === "unknown") && existingEditableChars > preCheckMinChars) {
     setStatus("Checking existing code...", "#60a5fa");
     setOutput("Editor mein code pehle se likha hai — pehle Submit karke exact error / test-case diff nikal raha hoon...");
     const preSub = await callBridge("CLICK_BUTTON", { targets: ["submit", "submit code", "compile & run"], preferEditorSubmit: true }, 3000);
@@ -1177,16 +1189,12 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
     );
 
     const slottedCode = formatCodeWithSlots(currentState.code, currentState.lockedLines, editableSlots, currentState.partialLockedLines);
-    const slotGuide = editableSlots.length
-      ? editableSlots.map((s) => `Slot ${s.id}: Lines ${s.start_line}-${s.end_line}`).join(", ")
-      : "Slot 1: Full file";
+    const hasLocks = (currentState.lockedLines || []).length > 0 || (currentState.partialLockedLines || []).length > 0;
 
-    const slotIdsText = editableSlots.length ? editableSlots.map((s) => s.id).join(", ") : "1";
     const prompt = previousError
-      ? `Fix this ${lang} error:\n${previousError}\n${errRequiredPkg ? `Line 1 MUST be '${errRequiredPkg}' and class MUST be '${errRequiredClass}'.\n` : ""}\nProblem:\n${problemText}\n\nCurrent Code (change ONLY <<< EDITABLE SLOT N >>>, never modify [LOCKED] lines; for [INLINE_BLANK] fill only the blank inside that line):\n${slottedCode}\n\nReply ONLY with the fixed code for Slot ${slotIdsText} inside triple backticks:\n\`\`\`text\n<<<SLOT 1>>>\n...fixed code...\n<<<END_SLOT 1>>>\n\`\`\``
-      : `Solve this ${lang} problem:\n${problemText}\n\nStarter Code (fill ONLY <<< EDITABLE SLOT N >>>, never modify [LOCKED] lines; for [INLINE_BLANK] fill only the blank inside that line):\n${slottedCode}\n\nReply ONLY with code for Slot ${slotIdsText} inside triple backticks (exact Python indentation & __init__):\n\`\`\`text\n<<<SLOT 1>>>\n...code...\n<<<END_SLOT 1>>>\n\`\`\``;
+      ? `Fix this ${lang} error in the code below:\n${previousError}\n${errRequiredPkg ? `Line 1 MUST be '${errRequiredPkg}' and class MUST be '${errRequiredClass}'.\n` : ""}\nProblem:\n${problemText}\n\nCurrent Code:\n${hasLocks ? slottedCode : currentState.code}\n\nReturn ONLY the complete fixed ${lang} code inside a single triple-backtick code block (no explanations; keep all [LOCKED] lines unchanged and fill any [INLINE_BLANK] gaps cleanly).`
+      : `Solve this ${lang} problem:\n${problemText}\n\nStarter Code:\n${hasLocks ? slottedCode : (currentState.code || "(empty)")}\n\nReturn ONLY the complete working ${lang} code inside a single triple-backtick code block (no explanations, preserve exact Python indentation & __init__, keep all [LOCKED] lines unchanged, and fill any [INLINE_BLANK] gaps cleanly).`;
 
-    const shouldUseChatGpt = isWebMode() && (consecutiveSameCode >= 1 || attempt === 3 || attempt === 5);
     let liveScreenshot = null;
     let finalPrompt = prompt;
     if (Boolean(previousError) || attempt >= 2) {
@@ -1194,8 +1202,12 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
       setOutput("Error/test-case screen ka live screenshot lekar AI ko bhej raha hoon...");
       liveScreenshot = await captureCleanTabScreenshot();
     }
-    const apiRes = await callGemini(finalPrompt, { expectJson: false, useChatGptFallback: shouldUseChatGpt, screenshot: liveScreenshot });
+    const subject = detectSubject(lang, problemText);
+    console.log("[CT-FSM] Ask AI", { attempt, subject, modelMode: getAiMode(), hasLocks, slots: editableSlots.map((s) => `${s.id}:${s.isInline ? "inline" : "block"}`) });
+    const apiRes = await callGemini(finalPrompt, { expectJson: false, screenshot: liveScreenshot, subject });
     if (!apiRes.ok) {
+      const failReason = /timeout/i.test(apiRes.error || "") ? "timeout" : "empty";
+      console.log(`[GEMINI_FAIL_REASON: ${failReason}]`, apiRes.error);
       setStatus("API Error", "#f87171");
       setOutput(`Gemini Error:\n${apiRes.error}`);
       return;
@@ -1204,11 +1216,9 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
     const rawReply = (apiRes.rawText || "").trim();
     const fullFileLines = (currentState.code || "").replace(/\r\n/g, "\n").split("\n");
     const isPythonLang = /python/i.test(lang || "");
-    // CodeTantra Python editor inserts real TAB (\t, shown as '---->|') on Enter/Return!
-    // Match the file's exact indentation style: use \t if file uses tabs OR has no space-only starter indent; otherwise keep spaces.
+    // Match the file's exact indentation style: only use tabs if starter code explicitly has \t; otherwise use 4 spaces (CodeTantra CM6 default '····').
     const fileHasTabs = /(?:^|\n)\t/.test(currentState.code || "");
-    const fileHasSpaceIndentOnly = !fileHasTabs && /(?:^|\n) {2,}\S/.test(currentState.code || "");
-    const pythonUseTabs = isPythonLang && !fileHasSpaceIndentOnly;
+    const pythonUseTabs = isPythonLang && fileHasTabs;
 
     function normalizePythonIndent(codeStr) {
       return codeStr
@@ -1232,12 +1242,19 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
 
     function cleanSlotCode(slotMeta, codeStr) {
       let c = (codeStr || "").replace(/\r\n/g, "\n");
-      // Use [ \t]*\n (NEVER \s*\n) so leading indentation on line 1 of the slot is NEVER eaten!
-      c = c.replace(/^```[a-z0-9+#-]*[ \t]*\n/i, "").replace(/\n[ \t]*```[ \t]*$/, "");
+      // Strip fenced wrappers outside/inside slot body without eating line-1 leading indentation
+      c = c.replace(/^```[a-z0-9+#-]*[ \t]*\n/i, "").replace(/\n[ \t]*```[ \t]*$/g, "");
+      c = c.replace(/^```[a-z0-9+#-]*[ \t]*|[ \t]*```$/gi, "");
+      // Strip any nested/stray <<<SLOT N>>> or <<<END_SLOT N>>> tags so they NEVER get typed into the editor!
+      c = c.replace(/^[ \t]*<<<\s*(?:END_)?SLOT\s*\d+\s*>>>[ \t]*$/gim, "").replace(/^\n+|\n+$/g, "");
       if (isPythonLang) {
-        // Guard against Markdown stripping double underscores from Python dunder methods
         c = c.replace(/^(\s*def\s+)init(\s*\()/gm, "$1__init__$2").replace(/^(\s*def\s+)str(\s*\()/gm, "$1__str__$2");
         c = normalizePythonIndent(c);
+      }
+      if (slotMeta?.isInline) {
+        const singleLine = c.split("\n").map((l) => l.trim()).filter(Boolean)[0] || c.trim();
+        const origWs = ((fullFileLines[slotMeta.start_line - 1] || "").match(/^([ \t]*)/) || ["", ""])[1];
+        return origWs + singleLine;
       }
       if (!slotMeta) return c;
       const slotLines = c.split("\n");
@@ -1261,10 +1278,8 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
           if (firstWs.length <= prevIndentNorm.length) {
             const otherIndented = slotLines.slice(firstNonEmptyIdx + 1).some((l) => l.trim().length > 0 && l.startsWith(requiredIndent));
             if (otherIndented) {
-              // Only the first line lost its indent — restore exact requiredIndent on that line!
               slotLines[firstNonEmptyIdx] = requiredIndent + firstLine.trimStart();
             } else {
-              // Entire slot was shifted left by 1 level — shift every non-empty line right by 1 unit!
               for (let k = firstNonEmptyIdx; k < slotLines.length; k++) {
                 if (slotLines[k].trim().length > 0) slotLines[k] = unit + slotLines[k];
               }
@@ -1277,94 +1292,294 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
 
     let parsed = { notes: "" };
     let edits = [];
-    let usedSlotFormat = false;
+    let parseTier = "none";
 
-    // TIER 1 (ZERO JSON BUGS): Parse <<<SLOT N>>> ... <<<END_SLOT N>>> raw code blocks
-    // CRITICAL: Use [ \t]*\r?\n (NEVER \s*\n) so leading tabs/spaces of line 1 inside the slot are NEVER eaten!
-    const slotRegex = /<<<SLOT\s*(\d+)>>>[ \t]*\r?\n?([\s\S]*?)(?:\r?\n?[ \t]*<<<END_SLOT\s*\1>>>|$)/gi;
-    let sm;
-    while ((sm = slotRegex.exec(rawReply)) !== null) {
-      const slotId = parseInt(sm[1], 10);
-      const rawSlotBody = (sm[2] || "").replace(/\n+$/, "");
-      if (!rawSlotBody.trim()) continue;
-      const slotMeta = editableSlots.find((m) => m.id === slotId) || (editableSlots.length === 1 ? editableSlots[0] : null);
-      usedSlotFormat = true;
-      if (slotMeta) {
-        edits.push({
-          mode: (currentState.lockedLines || []).length === 0 && editableSlots.length === 1 ? "replace_all" : "replace_lines",
-          start_line: slotMeta.start_line,
-          end_line: slotMeta.end_line,
-          code: cleanSlotCode(slotMeta, rawSlotBody)
+    function extractSlotEditsFromFullCode(starterCode, aiRawCode, lockedList, partialList, slots, inlineBlanksMeta = []) {
+      let cleanedAi = (aiRawCode || "").replace(/\r\n/g, "\n");
+      cleanedAi = cleanedAi.replace(/^```[a-z0-9+#-]*[ \t]*\n/i, "").replace(/\n[ \t]*```[ \t]*$/g, "").replace(/^\n+|\n+$/g, "");
+      if (!cleanedAi.trim()) return [];
+
+      const lockedArr = lockedList || [];
+      const partialArr = partialList || [];
+      if (lockedArr.length === 0 && partialArr.length === 0) {
+        return [{ mode: "replace_all", start_line: 1, end_line: 1, code: cleanSlotCode(null, cleanedAi) }];
+      }
+
+      const starterLines = (starterCode || "").replace(/\r\n/g, "\n").split("\n");
+      const aiLines = cleanedAi.split("\n");
+      const lockedSet = new Set(lockedArr);
+      const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+      const inlineMetaByLine = new Map((inlineBlanksMeta || []).map((b) => [b.line, b]));
+
+      // Existing locked lines set (prevent duplicating any locked/inline line into an editable_block!)
+      const existingProtectedNorms = new Set();
+      for (const ln of lockedArr) {
+        const n = norm(starterLines[ln - 1]);
+        if (n) existingProtectedNorms.add(n);
+      }
+
+      // Match [LOCKED] lines monotonically in aiLines as anchors
+      const anchorMap = new Map();
+      let aiCursor = 0;
+      let nonEmptyLockedTotal = 0;
+      for (let ln = 1; ln <= starterLines.length; ln++) {
+        if (!lockedSet.has(ln)) continue;
+        const target = norm(starterLines[ln - 1]);
+        if (!target) continue;
+        nonEmptyLockedTotal++;
+        for (let j = aiCursor; j < aiLines.length; j++) {
+          if (norm(aiLines[j]) === target) {
+            anchorMap.set(ln, j);
+            aiCursor = j + 1;
+            break;
+          }
+        }
+      }
+
+      if (nonEmptyLockedTotal >= 2 && anchorMap.size < Math.ceil(nonEmptyLockedTotal * 0.3) && slots.length === 1) {
+        return [{
+          mode: "replace_lines",
+          start_line: slots[0].start_line,
+          end_line: slots[0].end_line,
+          isInline: Boolean(slots[0].isInline),
+          code: cleanSlotCode(slots[0], cleanedAi)
+        }];
+      }
+
+      const outEdits = [];
+      const consumedAiIndices = new Set();
+
+      // STEP A: Fill Inline Blanks FIRST & mark matched Gemini lines as consumed!
+      for (const slot of slots) {
+        if (!slot.isInline) continue;
+        const origLine = starterLines[slot.start_line - 1] || "";
+        const meta = inlineMetaByLine.get(slot.start_line);
+        const gapM = origLine.match(/^([ \t]*\S.*?)([ \t]{3,})(\S.*)?$/);
+        const lockedPrefix = meta?.lockedPrefix ?? (gapM ? gapM[1] : "");
+        const lockedSuffix = meta?.lockedSuffix ?? (gapM ? (gapM[3] || "") : "");
+        const prefTrim = lockedPrefix.trim();
+        const sufTrim = lockedSuffix.trim();
+
+        let prevAiIdx = -1;
+        for (let ln = slot.start_line - 1; ln >= 1; ln--) {
+          if (anchorMap.has(ln)) { prevAiIdx = anchorMap.get(ln); break; }
+        }
+        let nextAiIdx = aiLines.length;
+        for (let ln = slot.end_line + 1; ln <= starterLines.length; ln++) {
+          if (anchorMap.has(ln)) { nextAiIdx = anchorMap.get(ln); break; }
+        }
+
+        const findMatchIdx = (startI, endI) => {
+          if (prefTrim) {
+            if (sufTrim) {
+              for (let j = startI; j < endI; j++) {
+                if (!consumedAiIndices.has(j) && aiLines[j].trim().startsWith(prefTrim) && aiLines[j].includes(sufTrim)) return j;
+              }
+            }
+            for (let j = startI; j < endI; j++) {
+              if (!consumedAiIndices.has(j) && aiLines[j].trim().startsWith(prefTrim)) return j;
+            }
+          }
+          for (let j = startI; j < endI; j++) {
+            if (!consumedAiIndices.has(j) && aiLines[j].trim().length > 0) return j;
+          }
+          return -1;
+        };
+
+        let matchedIdx = findMatchIdx(prevAiIdx + 1, nextAiIdx);
+        if (matchedIdx === -1) matchedIdx = findMatchIdx(0, aiLines.length);
+
+        if (matchedIdx !== -1) {
+          consumedAiIndices.add(matchedIdx);
+          const rawMatched = aiLines[matchedIdx];
+          let innerCode = rawMatched.trim();
+          if (prefTrim && innerCode.startsWith(prefTrim)) innerCode = innerCode.slice(prefTrim.length).trim();
+          if (sufTrim && innerCode.endsWith(sufTrim)) innerCode = innerCode.slice(0, innerCode.length - sufTrim.length).trim();
+          else if (sufTrim.startsWith("#")) innerCode = innerCode.replace(/\s*#.*$/, "").trim();
+
+          if (innerCode) {
+            console.log(`[CT-EDIT] Line ${slot.start_line} (inline_blank): matched ${JSON.stringify(innerCode)}`);
+            outEdits.push({
+              mode: "replace_lines",
+              start_line: slot.start_line,
+              end_line: slot.end_line,
+              isInline: true,
+              gapStart: meta?.gapStart,
+              gapEnd: meta?.gapEnd,
+              lockedPrefix,
+              lockedSuffix,
+              innerCode,
+              code: cleanSlotCode(slot, rawMatched)
+            });
+          }
+        }
+      }
+
+      // STEP B: Fill Full Editable Blocks Only Where Needed (exclude consumed inline lines & duplicate locked lines!)
+      for (const slot of slots) {
+        if (slot.isInline) continue;
+        let prevAiIdx = -1;
+        for (let ln = slot.start_line - 1; ln >= 1; ln--) {
+          if (anchorMap.has(ln)) { prevAiIdx = anchorMap.get(ln); break; }
+        }
+        let nextAiIdx = aiLines.length;
+        for (let ln = slot.end_line + 1; ln <= starterLines.length; ln++) {
+          if (anchorMap.has(ln)) { nextAiIdx = anchorMap.get(ln); break; }
+        }
+
+        const filteredLines = [];
+        for (let j = prevAiIdx + 1; j < nextAiIdx; j++) {
+          if (consumedAiIndices.has(j)) continue;
+          const lineN = norm(aiLines[j]);
+          if (lineN && existingProtectedNorms.has(lineN)) continue;
+          let matchesInlinePrefix = false;
+          for (const ln of partialArr) {
+            const bMeta = inlineMetaByLine.get(ln);
+            const pTrim = (bMeta?.lockedPrefix || "").trim();
+            if (pTrim && aiLines[j].trim().startsWith(pTrim)) { matchesInlinePrefix = true; break; }
+          }
+          if (matchesInlinePrefix) continue;
+          filteredLines.push(aiLines[j]);
+        }
+
+        const blockText = filteredLines.join("\n").replace(/^\n+|\n+$/g, "");
+        if (!blockText.trim()) continue;
+        const cleanedBlock = cleanSlotCode(slot, blockText);
+        if (norm(cleanedBlock) === norm(slot.code)) continue;
+
+        console.log(`[CT-EDIT] Block L${slot.start_line}-L${slot.end_line}: ${cleanedBlock.split("\n").length} line(s)`);
+        outEdits.push({
+          mode: "replace_lines",
+          start_line: slot.start_line,
+          end_line: slot.end_line,
+          isInline: false,
+          code: cleanedBlock
         });
-      } else if ((currentState.lockedLines || []).length === 0) {
-        edits.push({ mode: "replace_all", start_line: 1, end_line: 1, code: cleanSlotCode(null, rawSlotBody) });
+      }
+      return outEdits;
+    }
+
+    // TIER 1 (Primary Anchor-Based Diff on Fenced Code Block): Works naturally with full Gemini code!
+    const fenceBlocks = [];
+    const fenceRe = /```(?!json\b)[a-z0-9+#-]*[ \t]*\r?\n([\s\S]*?)```/gi;
+    let fm;
+    while ((fm = fenceRe.exec(rawReply)) !== null) {
+      if ((fm[1] || "").trim().length > 10 && !/<<<\s*SLOT\s*\d+\s*>>>/i.test(fm[1])) {
+        fenceBlocks.push(fm[1]);
+      }
+    }
+    const bestFence = fenceBlocks.sort((a, b) => b.length - a.length)[0];
+    if (bestFence) {
+      const anchored = extractSlotEditsFromFullCode(
+        currentState.code,
+        bestFence,
+        currentState.lockedLines,
+        currentState.partialLockedLines,
+        editableSlots,
+        currentState.inlineBlanks || []
+      );
+      if (anchored.length > 0) {
+        parseTier = "anchor-diff";
+        edits = anchored;
       }
     }
 
-    // TIER 2 (JSON Backup): If Gemini still replied in JSON format, parse slots/edits cleanly
+    // TIER 2 (JSON Backup): Parse {"1": "...", "2": "..."} or {"slots": [...]} or {"edits": [...]}
     if (!edits.length) {
       try {
         const maybeJson = JSON.parse(extractJsonFromText(rawReply));
-        parsed = maybeJson || parsed;
-        if (Array.isArray(maybeJson.slots) && maybeJson.slots.length > 0) {
-          usedSlotFormat = true;
-          for (const s of maybeJson.slots) {
-            if (!s || typeof s.code !== "string") continue;
-            const slotMeta = editableSlots.find((m) => m.id === Number(s.id)) || (editableSlots.length === 1 ? editableSlots[0] : null);
-            if (slotMeta) {
-              edits.push({
-                mode: (currentState.lockedLines || []).length === 0 && editableSlots.length === 1 ? "replace_all" : "replace_lines",
-                start_line: slotMeta.start_line,
-                end_line: slotMeta.end_line,
-                code: cleanSlotCode(slotMeta, s.code)
-              });
-            } else if ((currentState.lockedLines || []).length === 0) {
-              edits.push({ mode: "replace_all", start_line: 1, end_line: 1, code: cleanSlotCode(null, s.code) });
+        if (maybeJson && typeof maybeJson === "object" && !Array.isArray(maybeJson)) {
+          parsed = maybeJson;
+          if (Array.isArray(maybeJson.slots) && maybeJson.slots.length > 0) {
+            parseTier = "json-slots";
+            for (const s of maybeJson.slots) {
+              if (!s || typeof s.code !== "string") continue;
+              const slotMeta = editableSlots.find((m) => m.id === Number(s.id)) || (editableSlots.length === 1 ? editableSlots[0] : null);
+              if (slotMeta) {
+                edits.push({
+                  mode: (currentState.lockedLines || []).length === 0 && editableSlots.length === 1 && !slotMeta.isInline ? "replace_all" : "replace_lines",
+                  start_line: slotMeta.start_line,
+                  end_line: slotMeta.end_line,
+                  isInline: Boolean(slotMeta.isInline),
+                  code: cleanSlotCode(slotMeta, s.code)
+                });
+              } else if ((currentState.lockedLines || []).length === 0) {
+                edits.push({ mode: "replace_all", start_line: 1, end_line: 1, code: cleanSlotCode(null, s.code) });
+              }
+            }
+          } else if (Array.isArray(maybeJson.edits) && maybeJson.edits.length > 0) {
+            parseTier = "json-edits";
+            edits = maybeJson.edits;
+          } else if (typeof maybeJson.code === "string" && maybeJson.code.trim()) {
+            parseTier = "json-code";
+            edits = [{ mode: maybeJson.mode || "replace_all", start_line: maybeJson.start_line || 1, end_line: maybeJson.end_line || 1, code: maybeJson.code }];
+          } else {
+            const numKeys = Object.keys(maybeJson).filter((k) => /^\d+$/.test(k)).sort((a, b) => Number(a) - Number(b));
+            if (numKeys.length > 0) {
+              parseTier = "json-map";
+              for (const k of numKeys) {
+                const val = maybeJson[k];
+                if (typeof val !== "string" || !val.trim()) continue;
+                const slotMeta = editableSlots.find((m) => m.id === Number(k)) || (editableSlots.length === 1 ? editableSlots[0] : null);
+                if (slotMeta) {
+                  edits.push({
+                    mode: (currentState.lockedLines || []).length === 0 && editableSlots.length === 1 && !slotMeta.isInline ? "replace_all" : "replace_lines",
+                    start_line: slotMeta.start_line,
+                    end_line: slotMeta.end_line,
+                    isInline: Boolean(slotMeta.isInline),
+                    code: cleanSlotCode(slotMeta, val)
+                  });
+                } else if ((currentState.lockedLines || []).length === 0) {
+                  edits.push({ mode: "replace_all", start_line: 1, end_line: 1, code: cleanSlotCode(null, val) });
+                }
+              }
             }
           }
-        } else if (Array.isArray(maybeJson.edits) && maybeJson.edits.length > 0) {
-          edits = maybeJson.edits;
-        } else if (typeof maybeJson.code === "string" && maybeJson.code.trim()) {
-          edits = [{ mode: maybeJson.mode || "replace_all", start_line: maybeJson.start_line || 1, end_line: maybeJson.end_line || 1, code: maybeJson.code }];
         }
       } catch {}
     }
 
-    // TIER 3 (Plain Fenced Code Fallback): Never throw away a working ```java / ```python code block!
-    if (!edits.length && editableSlots.length === 1) {
-      const fenceBlocks = [];
-      const fenceRe = /```[a-z0-9+#-]*[ \t]*\r?\n([\s\S]*?)```/gi;
-      let fm;
-      while ((fm = fenceRe.exec(rawReply)) !== null) {
-        if ((fm[1] || "").trim().length > 15) fenceBlocks.push(fm[1]);
-      }
-      const bestFence = fenceBlocks.sort((a, b) => b.length - a.length)[0];
-      if (bestFence) {
-        usedSlotFormat = true;
-        const slotMeta = editableSlots[0];
-        edits.push({
-          mode: (currentState.lockedLines || []).length === 0 ? "replace_all" : "replace_lines",
-          start_line: slotMeta.start_line,
-          end_line: slotMeta.end_line,
-          code: cleanSlotCode(slotMeta, bestFence)
-        });
+    // TIER 3 (Forgiving <<<SLOT N>>> Fallback)
+    if (!edits.length) {
+      const slotRegex = /<<<\s*SLOT\s*(\d+)\s*>>>[ \t]*\r?\n?([\s\S]*?)(?:\r?\n?[ \t]*<<<\s*END_SLOT\s*\1\s*>>>|$)/gi;
+      let sm;
+      while ((sm = slotRegex.exec(rawReply)) !== null) {
+        const slotId = parseInt(sm[1], 10);
+        const rawSlotBody = (sm[2] || "").replace(/\n+$/, "");
+        if (!rawSlotBody.trim()) continue;
+        const slotMeta = editableSlots.find((m) => m.id === slotId) || (editableSlots.length === 1 ? editableSlots[0] : null);
+        parseTier = "slot-tags";
+        if (slotMeta) {
+          edits.push({
+            mode: (currentState.lockedLines || []).length === 0 && editableSlots.length === 1 && !slotMeta.isInline ? "replace_all" : "replace_lines",
+            start_line: slotMeta.start_line,
+            end_line: slotMeta.end_line,
+            isInline: Boolean(slotMeta.isInline),
+            code: cleanSlotCode(slotMeta, rawSlotBody)
+          });
+        } else if ((currentState.lockedLines || []).length === 0) {
+          edits.push({ mode: "replace_all", start_line: 1, end_line: 1, code: cleanSlotCode(null, rawSlotBody) });
+        }
       }
     }
+
+    console.log("[CT-PARSE]", { parseTier, editsCount: edits.length, rawLen: rawReply.length });
 
     // Guard against malformed multi-Full hallucinated arrays
     if (edits.length > 1 && edits.every((e) => e.mode === "replace_all" || !e.start_line)) {
       edits = [{ mode: "replace_all", start_line: 1, end_line: 1, code: edits.map((e) => e.code || "").join("\n") }];
     } else if (edits.length > 12) {
-      previousError = (previousError ? previousError + "\n" : "") + "Return 1 clean <<<SLOT N>>> block per editable region.";
+      previousError = (previousError ? previousError + "\n" : "") + "Return 1 clean JSON key per editable slot.";
       setStatus(`Cleanup retry (${attempt})...`, "#facc15");
       continue;
     }
 
     if (!edits.length) {
+      console.warn("[GEMINI_FAIL_REASON: parse_failed]", rawReply.slice(0, 200));
       if (attempt < MAX_FIX_ATTEMPTS) {
         previousError =
           (previousError ? previousError + "\n" : "") +
-          "CRITICAL: Output your fixed code wrapped inside <<<SLOT 1>>> ... <<<END_SLOT 1>>> tags (plain code, NO JSON)!";
+          'CRITICAL: Return ONLY a valid JSON object mapping slot numbers to code, e.g. {"1": "..."}.';
         setStatus(`Format retry (${attempt})...`, "#facc15");
         continue;
       }
@@ -1372,6 +1587,15 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
       setStatus("Paused (no code)", "#facc15");
       setOutput("Gemini se code extract nahi ho paya (3 tries complete). Raw reply check karo ya 'Solve & Type' dabao.");
       return;
+    }
+
+    // HARD SLOT-TAG GUARD: Never inject raw <<<SLOT or <<<END_SLOT tags into CodeTantra editor!
+    if (edits.some((e) => /<<<\s*(?:END_)?SLOT/i.test(e.code || ""))) {
+      console.warn("[GEMINI_FAIL_REASON: guard_rejected]", "stray SLOT tag in parsed code");
+      edits = edits.map((e) => ({
+        ...e,
+        code: (e.code || "").replace(/^[ \t]*<<<\s*(?:END_)?SLOT\s*\d+\s*>>>[ \t]*$/gim, "").trim()
+      }));
     }
 
     // INTERNAL SELF-TEST BEFORE TYPING: Assemble full code + verify against Sample Test Cases!
@@ -1400,18 +1624,22 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
         return /\S\s{3,}\S/.test(pLine) || (pLine === oLine && /\S\s{2,}\S/.test(oLine));
       });
       if (unfilledLn) {
+        console.warn("[GEMINI_FAIL_REASON: guard_rejected]", `inline blank unfilled at L${unfilledLn}`);
         const blankSlot = editableSlots.find((s) => s.start_line === unfilledLn && s.end_line === unfilledLn);
         previousError =
-          `CRITICAL: You left [INLINE_BLANK] on Line ${unfilledLn} UNFILLED! You MUST output <<<SLOT ${blankSlot ? blankSlot.id : 1}>>> with the completed Line ${unfilledLn} (fill the white gap inside '${(origLines[unfilledLn - 1] || "").trim()}').`;
+          `CRITICAL: You left [INLINE_BLANK] on Line ${unfilledLn} UNFILLED! Return JSON {"${blankSlot ? blankSlot.id : 1}": "<completed line>"} filling the white gap inside '${(origLines[unfilledLn - 1] || "").trim()}'.`;
         setStatus(`Blank missed (${attempt})...`, "#facc15");
         setOutput(`AI ne Line ${unfilledLn} ka [INLINE_BLANK] khali chhod diya — Submit nahi kar raha, dobara fill maang raha hoon...`);
         continue;
       }
     }
 
-    // PYTHON INDENTATION GUARD: Catch ANY zero/under-indented line immediately after a block header ending with ':' BEFORE typing!
-    if (isPythonLang && attempt < MAX_FIX_ATTEMPTS) {
+    const allSlotsInline = editableSlots.length > 0 && editableSlots.every((s) => s.isInline);
+
+    // PYTHON INDENTATION GUARD: Skip when all slots are single-line inline blanks OR when target line is an inline_blank!
+    if (isPythonLang && !allSlotsInline && attempt < MAX_FIX_ATTEMPTS) {
       const pyLines = assembledPreview.split("\n");
+      const inlineLineSet = new Set(currentState.partialLockedLines || []);
       let badIndentLine = -1;
       for (let pi = 0; pi < pyLines.length - 1; pi++) {
         const cur = pyLines[pi];
@@ -1419,7 +1647,7 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
         const curIndent = (cur.match(/^([ \t]*)/) || ["", ""])[1].length;
         let nextIdx = pi + 1;
         while (nextIdx < pyLines.length && (!pyLines[nextIdx].trim() || /^\s*#/.test(pyLines[nextIdx]))) nextIdx++;
-        if (nextIdx < pyLines.length) {
+        if (nextIdx < pyLines.length && !inlineLineSet.has(nextIdx + 1)) {
           const nxtIndent = (pyLines[nextIdx].match(/^([ \t]*)/) || ["", ""])[1].length;
           if (nxtIndent <= curIndent) {
             badIndentLine = nextIdx + 1;
@@ -1428,17 +1656,18 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
         }
       }
       if (badIndentLine !== -1) {
+        console.log("[GEMINI_FAIL_REASON: guard_rejected]", `python indent error at L${badIndentLine}`);
         previousError =
           (previousError ? previousError + "\n" : "") +
-          `CRITICAL PYTHON INDENTATION ERROR at Line ${badIndentLine}: Line ${badIndentLine} MUST be indented deeper than the ':' header above it! Wrap your ENTIRE <<<SLOT N>>> output inside triple backticks with exact indentation!`;
+          `CRITICAL PYTHON INDENTATION ERROR at Line ${badIndentLine}: Line ${badIndentLine} MUST be indented deeper than the ':' header above it!`;
         setStatus(`Indent retry (${attempt})...`, "#facc15");
         setOutput(`Line ${badIndentLine} par Python indentation missing thi — dobara sahi indentation maang raha hoon...`);
         continue;
       }
     }
 
-    // JAVA / C / C++ BRACE-BALANCE GUARD: Catch missing '}' before typing so next [LOCKED] method never gets 'illegal start of expression'!
-    if (/java|cpp|c\b/i.test(lang || "") && attempt < MAX_FIX_ATTEMPTS) {
+    // JAVA / C / C++ BRACE-BALANCE GUARD: Skip when all slots are single-line inline blanks!
+    if (/java|cpp|c\b/i.test(lang || "") && !allSlotsInline && attempt < MAX_FIX_ATTEMPTS) {
       const stripped = assembledPreview
         .replace(/\/\*[\s\S]*?\*\//g, "")
         .replace(/\/\/.*$/gm, "")
@@ -1447,6 +1676,7 @@ async function solveCodingProblem(edState, { autoSubmitAndNext = false } = {}) {
       const opens = (stripped.match(/\{/g) || []).length;
       const closes = (stripped.match(/\}/g) || []).length;
       if (opens !== closes) {
+        console.warn("[GEMINI_FAIL_REASON: guard_rejected]", `brace mismatch ${opens} vs ${closes}`);
         previousError =
           (previousError ? previousError + "\n" : "") +
           `CRITICAL BRACE MISMATCH: Assembled code has ${opens} '{' vs ${closes} '}'! Close every method/if/else block properly with '}' before the next [LOCKED] line.`;
@@ -1627,6 +1857,7 @@ Task:
       `Model: ${apiRes.model}\nBlocks: ${blockSummary}\nTyping naturally (~${Math.round(targetTotalMs / 1000)}s)...\n${parsed.notes || ""}`
     );
 
+    console.log("[CT-INJECT] Typing edits", edits.map((e) => ({ mode: e.mode, s: e.start_line, e: e.end_line, len: (e.code || "").length })));
     const typeRes = await callBridge("TYPE_CODE", { edits, targetTotalMs, lockedLines: currentState.lockedLines || [] }, 300000);
     if (!typeRes || !typeRes.ok) {
       const typeErr = typeRes?.error || "Typing fail/stop ho gayi.";
@@ -1659,8 +1890,9 @@ Task:
     }
 
     setStatus("Typing done ✓", "#86efac");
+    const codeFilled = Boolean(typeRes && typeRes.ok);
 
-    if (!autoSubmitAndNext) {
+    if (!autoSubmitAndNext || !codeFilled) {
       setOutput(`Typing complete (${typeRes.type}, blocks: ${blockSummary}).\nAb Submit dabao ya Start Auto chalao.`);
       return;
     }
@@ -1839,7 +2071,7 @@ Wrap your JSON inside a triple-backtick json code block so underscores are NEVER
 \`\`\``;
 
       try {
-        const apiRes = await callGemini(prompt, { expectJson: true, useChatGptFallback: attempt === 3 });
+        const apiRes = await callGemini(prompt, { expectJson: true, subject: detectSubject("", mcqState.questionText) });
         if (apiRes.ok) {
           modelUsed = apiRes.model;
           const cleaned = apiRes.rawText.replace(/^```json\s*/i, "").replace(/```$/i, "").trim();
@@ -1980,8 +2212,8 @@ async function runAutoTick() {
       return;
     }
 
-    // Give CodeTantra SPA iframes, CodeMirror 6, and test panel 1.8s to mount & clear previous slide badges
-    if (Date.now() - slideEnteredAt < 1800) {
+    // Give CodeTantra SPA iframes, CodeMirror 6, and test panel 1.0s to mount & clear previous slide badges
+    if (Date.now() - slideEnteredAt < 1000) {
       setStatus("Loading slide...", "#9ca3af");
       return;
     }
@@ -2014,7 +2246,7 @@ async function runAutoTick() {
     if (vidRes && vidRes.found) {
       if (vidRes.ended) {
         solvedUrls.add(window.location.href);
-        await sleep(1200);
+        await sleep(500);
         await clickNextSlide();
       } else {
         setStatus("Playing video...", "#86efac");
@@ -2029,14 +2261,14 @@ async function runAutoTick() {
       return;
     }
 
-    // If on an "About this unit" overview page (no editor/quiz/video/submit), open the first uncompleted card
-    if (Date.now() - slideEnteredAt >= 3200) {
+    // If on an "About this unit" overview page (no editor/quiz/video/submit), open the first uncompleted card quickly
+    if (Date.now() - slideEnteredAt >= 1200) {
       const beforeUrl = window.location.href;
       const unitRes = await callBridge("OPEN_UNIT_ITEM", {}, 2500);
       if (unitRes && unitRes.ok) {
         setStatus("Opening card...", "#86efac");
         setOutput(`Unit card open kar raha hoon:\n${unitRes.title || "First question"}`);
-        await sleep(1500);
+        await sleep(700);
         if (window.location.href !== beforeUrl) return;
       } else if (unitRes && unitRes.allCompleted) {
         // All cards in this unit are already green-ticked -> check left sidebar for next incomplete item!
@@ -2045,7 +2277,7 @@ async function runAutoTick() {
         if (sideRes && sideRes.ok) {
           setStatus("Opening pending...", "#86efac");
           setOutput(`Sidebar se incomplete question khol raha hoon:\n${sideRes.title}`);
-          await sleep(1500);
+          await sleep(700);
           if (window.location.href !== beforeUrl) return;
         }
       }
